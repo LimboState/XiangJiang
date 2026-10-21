@@ -1,0 +1,14 @@
+# Mill 1.0.6 uses the official upstream binary; see docs/sketchNPU.md.
+name: XJ
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - openjdk=21
+  - verilator=5.052
+  - gtkwave=3.3.121
+  - cxx-compiler
+  - make
+  - pkg-config

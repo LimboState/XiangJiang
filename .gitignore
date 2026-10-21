@@ -1,0 +1,40 @@
+# Mill build output
+/out/
+
+# Generated RTL and configuration
+/generated/
+
+# Metals / Bloop / BSP
+/.metals/
+/.bloop/
+/.bsp/
+
+# Local IDE settings
+/.idea/
+/.idea_modules/
+/.vscode/
+
+# Chisel / Verilator simulation artifacts
+/build/
+test_run_dir/
+obj_dir/
+*.vcd
+*.fst
+*.fir
+*.anno.json
+*.log
+
+# Python caches and local virtual environments
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db

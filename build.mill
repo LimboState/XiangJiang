@@ -1,0 +1,32 @@
+//| mill-version: 1.0.6
+package build
+
+import mill._
+import mill.scalalib._
+
+object xj extends SbtModule {
+  def scalaVersion = "2.13.18"
+  def chiselVersion = "7.16.0"
+
+  def moduleDir = super.moduleDir / os.up
+
+  override def scalacOptions = Seq(
+    "-language:reflectiveCalls",
+    "-deprecation",
+    "-feature",
+    "-Xcheckinit",
+    "-Ymacro-annotations",
+  )
+  override def mvnDeps = Seq(
+    mvn"org.chipsalliance::chisel:$chiselVersion",
+  )
+  override def scalacPluginMvnDeps = Seq(
+    mvn"org.chipsalliance:::chisel-plugin:$chiselVersion",
+  )
+
+  object test extends SbtTests with TestModule.ScalaTest {
+    override def mvnDeps = super.mvnDeps() ++ Seq(
+      mvn"org.scalatest::scalatest:3.2.19",
+    )
+  }
+}
