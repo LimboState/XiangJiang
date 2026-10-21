@@ -7,10 +7,13 @@ Scalar-only Chisel NPU with a 33-instruction RV32I subset, ordered commit, preci
 Set up the `XJ` environment using the [toolchain instructions](docs/sketchNPU.md#appendix-a-rtl-development-environment), then run from the repository root:
 
 ```bash
-conda activate XJ
-mill xj.test
-mill xj.runMain top.Generate generated
+./mill xj.test
+./mill xj.runMain top.Generate generated
 ```
+
+Use **`./mill`**, not bare `mill`: the repository launcher selects the `XJ` toolchain and runs Mill with `--no-server`, without requiring prior `conda activate`. It does not change the parent shell or replace system tools.
+
+Tests automatically elaborate the Chisel design, compile it with Verilator, and run the simulation; generating RTL first is unnecessary. If compilation fails with `Invalid Option: --build`, check the selected Verilator using the [toolchain troubleshooting instructions](docs/sketchNPU.md#a1-activate-and-use).
 
 The RTL top module is `XiangJiangNPU`. Use `generated/filelist.f` with `generated/` as the downstream compiler's working directory.
 

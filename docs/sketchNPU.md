@@ -447,13 +447,25 @@ The `XJ` conda environment provides the Linux x86-64 RTL toolchain. On this work
 
 ### A.1. Activate and Use
 
-Run from the repository root:
+Run from the repository root using the repository launcher; no shell activation is required:
+
+```bash
+./mill xj.compile
+./mill xj.test
+```
+
+`./mill` runs the Mill installed in `XJ` through `conda run -n XJ`, always with `--no-server`. It uses `CONDA_EXE` when set, otherwise `$HOME/miniforge3/bin/conda`. The launcher selects the toolchain only for its child process; bare `mill` still depends on the parent shell's `PATH`. To use native tools interactively:
 
 ```bash
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate XJ
-mill --no-server xj.compile
+command -v verilator
+verilator --version
 ```
+
+The selected Verilator should be `$CONDA_PREFIX/bin/verilator`, version 5.052. If a test log shows `/usr/bin/verilator` followed by `%Error: Invalid Option: --build`, it selected the retained system Verilator 4.028, which cannot compile the ChiselSim harness. Run `./mill xj.test` instead of bare `mill xj.test`; do not remove `--build` or change RTL to work around this toolchain error.
+
+The launcher was verified with Conda activation variables unset and `PATH=/usr/bin:/bin`: all 30 simulations across six suites passed, and the generated simulation Makefile selected `~/miniforge3/envs/XJ/bin/verilator`.
 
 Place Chisel sources in `src/main/scala`. The `xj` module in `build.mill` pins Scala, the Chisel library, and the matching compiler plugin; Chisel is not a Python package. `.mill-jvm-opts` supplies the project root. Chisel automatically resolves its matching firtool; do not override it with an unrelated system version. First-time dependency resolution requires network access.
 
@@ -499,7 +511,7 @@ conda activate XJ
     "$tmp" | sha256sum --check
   install -m 755 "$tmp" "$CONDA_PREFIX/bin/mill"
 )
-mill --no-server xj.compile
+./mill xj.compile
 ```
 
 The `.exe` filename is upstream's cross-platform JVM launcher, not a Windows-only binary. Scala/Chisel configuration follows the [official Chisel installation guidance](https://www.chisel-lang.org/docs/installation).
@@ -608,11 +620,11 @@ There is no instruction-level trap handler or resume-at-fault mechanism. A resta
 
 ### B.6. Build and Verification
 
-From the repository root with `XJ` active:
+From the repository root using the `XJ`-aware launcher (no prior shell activation required):
 
 ```bash
-mill xj.test
-mill xj.runMain top.Generate generated
+./mill xj.test
+./mill xj.runMain top.Generate generated
 ```
 
 The generator emits split SystemVerilog, verification layers, `filelist.f`, and `xiangjiang-config.json`. Downstream tools should consume `filelist.f` **with `generated/` as their working directory**, rather than compiling only `XiangJiangNPU.sv`; file-list entries are relative to that directory.

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+conda_exe="${CONDA_EXE:-$HOME/miniforge3/bin/conda}"
+exec "$conda_exe" run --no-capture-output -n XJ \
+  bash -c 'exec "$CONDA_PREFIX/bin/mill" --no-server "$@"' -- "$@"
