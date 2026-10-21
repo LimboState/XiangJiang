@@ -5,7 +5,7 @@ import chisel3.util._
 import xiangjiang._
 
 /** Reservation station selecting the oldest ready sequence number, not slot. */
-class IssueUnit(p: XJParams, headOnly: Boolean = false) extends Module {
+class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean = false) extends Module {
   val io = IO(new Bundle {
     val dispatch = Flipped(Decoupled(new IssueEntry(p)))
     val wakeup = Input(Valid(new ExeResult(p)))
@@ -25,7 +25,23 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false) extends Module {
       when(!source.ready && io.wakeup.valid && !io.wakeup.bits.exception &&
         TagMatch(source.tag, io.wakeup.bits.tag)) {
         target.ready := true.B
-        target.value := io.wakeup.bits.data
+        target.value := io.wakeup.bits.data(31, 0)
+      }
+    }
+    if (vectorEnabled) {
+      for ((source, target) <- Seq(entry.vsrc1 -> captured.vsrc1, entry.vsrc2 -> captured.vsrc2,
+        entry.vold -> captured.vold, entry.vmask -> captured.vmask)) {
+        when(!source.ready && io.wakeup.valid && !io.wakeup.bits.exception &&
+          TagMatch(source.tag, io.wakeup.bits.tag)) {
+          target.ready := true.B
+          target.value := io.wakeup.bits.data
+        }
+      }
+    } else {
+      // Scalar stations do not retain vector payloads merely to share the FU port.
+      for (operand <- Seq(captured.vsrc1, captured.vsrc2, captured.vold, captured.vmask)) {
+        operand := 0.U.asTypeOf(new VectorOperand(p))
+        operand.ready := true.B
       }
     }
     captured
@@ -36,7 +52,13 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false) extends Module {
   for (i <- 0 until p.nIssue) {
     awakened(i) := captureWakeup(entries(i))
     val atHead = if (headOnly) io.head.valid && TagMatch(entries(i).uop.tag, io.head.bits) else true.B
-    eligible(i) := valid(i) && awakened(i).src1.ready && awakened(i).src2.ready && atHead
+    val vectorReady = if (vectorEnabled) {
+      (!entries(i).uop.usesV1 || awakened(i).vsrc1.ready) &&
+        (!entries(i).uop.usesV2 || awakened(i).vsrc2.ready) &&
+        (!entries(i).uop.usesVOld || awakened(i).vold.ready) &&
+        (!entries(i).uop.usesVMask || awakened(i).vmask.ready)
+    } else true.B
+    eligible(i) := valid(i) && awakened(i).src1.ready && awakened(i).src2.ready && vectorReady && atHead
   }
 
   var found: Bool = false.B
@@ -60,6 +82,12 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false) extends Module {
     when(valid(i)) {
       entries(i).src1 := awakened(i).src1
       entries(i).src2 := awakened(i).src2
+      if (vectorEnabled) {
+        entries(i).vsrc1 := awakened(i).vsrc1
+        entries(i).vsrc2 := awakened(i).vsrc2
+        entries(i).vold := awakened(i).vold
+        entries(i).vmask := awakened(i).vmask
+      }
     }
   }
   when(io.issue.fire) {

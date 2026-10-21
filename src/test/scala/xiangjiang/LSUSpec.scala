@@ -24,11 +24,19 @@ class LSUSpec extends AnyFunSuite with ChiselSim {
         e.uop.op.poke(if (store) UOpCode.SW else UOpCode.LW); e.uop.fu.poke(FuType.mem)
         e.uop.rs1.poke(0); e.uop.rs2.poke(if (store) 1 else 0); e.uop.rd.poke(0)
         e.uop.usesRs1.poke(true); e.uop.usesRs2.poke(store); e.uop.writesRd.poke(false)
+        e.uop.vecOp.poke(0); e.uop.writesV.poke(false)
+        e.uop.usesV1.poke(false); e.uop.usesV2.poke(false)
+        e.uop.usesVOld.poke(false); e.uop.usesVMask.poke(false)
+        e.uop.maskReg.poke(0); e.uop.unmasked.poke(true)
         e.uop.imm.poke(addr); e.uop.useImm.poke(true); e.uop.barrier.poke(false)
         e.uop.exception.poke(false); e.uop.cause.poke(0); e.uop.badAddr.poke(0)
         e.uop.tag.slot.poke(slot); e.uop.tag.generation.poke(1); e.uop.seq.poke(slot)
         e.src1.ready.poke(true); e.src1.value.poke(0); e.src1.tag.slot.poke(0); e.src1.tag.generation.poke(0)
         e.src2.ready.poke(!waitingData); e.src2.value.poke(0); e.src2.tag.slot.poke(7); e.src2.tag.generation.poke(1)
+        for (source <- Seq(e.vsrc1, e.vsrc2, e.vold, e.vmask)) {
+          source.ready.poke(true); source.value.poke(0)
+          source.tag.slot.poke(0); source.tag.generation.poke(0)
+        }
         dut.io.allocate.valid.poke(true); dut.io.allocate.ready.expect(true)
         dut.clock.step(); dut.io.allocate.valid.poke(false)
       }

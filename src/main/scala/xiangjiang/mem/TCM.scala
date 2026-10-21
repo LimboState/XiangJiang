@@ -20,7 +20,7 @@ class InstructionTcm(p: XJParams) extends Module {
 }
 
 class BankRead(p: XJParams) extends Bundle {
-  val row = UInt(math.max(1, log2Ceil(p.bankBytes / 64)).W)
+  val row = UInt(log2Ceil(p.bankBytes / 64).W)
 }
 class BankWrite(p: XJParams) extends BankRead(p) {
   val data = UInt(512.W)

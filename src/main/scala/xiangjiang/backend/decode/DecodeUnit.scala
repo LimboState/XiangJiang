@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 import xiangjiang._
 
-/** Strict RV32 scalar-subset decode; exception records still enter the ROB. */
+/** Strict scalar/vector decode; exception records still enter the ROB. */
 class DecodeUnit(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val in = Input(new FetchPacket)
@@ -69,8 +69,14 @@ class DecodeUnit(p: XJParams) extends Module {
   }
   when(opcode === "h37".U) { decode(UOpCode.LUI, FuType.alu, false, false, true, immU, true) }
   when(opcode === "h17".U) { decode(UOpCode.AUIPC, FuType.alu, false, false, true, immU, true) }
-  when(opcode === "h03".U && funct3 === 2.U) { decode(UOpCode.LW, FuType.mem, true, false, true, immI, true) }
-  when(opcode === "h23".U && funct3 === 2.U) { decode(UOpCode.SW, FuType.mem, true, true, false, immS, true) }
+  for ((f3, op) <- Seq((2, UOpCode.LW))) {
+    when(opcode === "h03".U && funct3 === f3.U) {
+      decode(op, FuType.mem, true, false, true, immI, true)
+    }
+  }
+  when(opcode === "h23".U && funct3 === 2.U) {
+    decode(UOpCode.SW, FuType.mem, true, true, false, immS, true)
+  }
   for ((f3, op) <- Seq((0, UOpCode.BEQ), (1, UOpCode.BNE), (4, UOpCode.BLT),
                        (5, UOpCode.BGE), (6, UOpCode.BLTU), (7, UOpCode.BGEU))) {
     when(opcode === "h63".U && funct3 === f3.U) {
@@ -83,15 +89,62 @@ class DecodeUnit(p: XJParams) extends Module {
   when(opcode === "h0f".U && funct3 === 0.U) {
     decode(UOpCode.FENCE, FuType.system, false, false, false, 0.U, false)
   }
-  when(inst === 0.U) { decode(UOpCode.HALT, FuType.system, false, false, false, 0.U, false) }
+  // Only the exact custom-0 word is HALT.  Every other custom-0 encoding,
+  // including the all-zero word, is illegal.
+  when(inst === "h0000000b".U) {
+    decode(UOpCode.HALT, FuType.system, false, false, false, 0.U, false)
+  }
+
+  // Vector opcodes deliberately use OP-V plus the three custom opcode groups.
+  // custom-0 is reserved for the exact HALT word above.
+  val customOpcode = opcode === "h57".U || opcode === "h2b".U ||
+    opcode === "h5b".U || opcode === "h7b".U
+  val customIndex = MuxLookup(opcode, 0.U(2.W))(Seq(
+    "h57".U -> 0.U, "h2b".U -> 1.U, "h5b".U -> 2.U, "h7b".U -> 3.U))
+  val vecOp = Cat(inst(25), funct3, customIndex)
+  val unary = vecOp === VecOp.vunary.U
+  val selector = inst(19, 15)
+  val reduction = unary && (selector === VecOp.uFredSum.U || selector === VecOp.uFredMax.U)
+  val vectorMemory = vecOp >= VecOp.vle32.U && vecOp <= VecOp.vse16.U
+  val vectorStore = vecOp === VecOp.vse32.U || vecOp === VecOp.vse16.U
+  val merge = vecOp === VecOp.vmerge.U
+  val unaryLegal = selector <= VecOp.uRsqrt.U
+  when(customOpcode && vecOp =/= 63.U && (!unary || unaryLegal) && (!merge || !inst(26))) {
+    legal := true.B
+    io.out.op := UOpCode.VECTOR
+    io.out.fu := Mux(vectorMemory, FuType.mem, FuType.vector)
+    io.out.vecOp := vecOp
+    io.out.unmasked := inst(26)
+    io.out.maskReg := inst(31, 27)
+    io.out.usesRs1 := (vecOp < VecOp.vslideup.U && vecOp(0)) ||
+      vecOp === VecOp.vslideup.U || vecOp === VecOp.vslidedown.U || vectorMemory
+    io.out.usesV1 := (vecOp < VecOp.vslideup.U && !vecOp(0)) || merge || vecOp === VecOp.vrgather.U
+    io.out.usesV2 := !vectorMemory
+    io.out.usesVMask := !inst(26)
+    io.out.usesVOld := vectorStore || (!reduction && !merge &&
+      (!inst(26) || (vecOp >= VecOp.vmseq.U && vecOp <= VecOp.vmfle.U) ||
+        vecOp === VecOp.vfmacc.U || vecOp === (VecOp.vfmacc + 1).U))
+    io.out.writesV := !vectorStore && !reduction
+    destination := reduction
+    io.out.imm := Mux(vectorMemory,
+      Cat(Fill(27, inst(24)), inst(24, 20)), Cat(0.U(27.W), selector))
+    io.out.useImm := vectorMemory || vecOp === VecOp.vslideupImm.U ||
+      vecOp === VecOp.vslidedownImm.U
+  }
 
   io.out.exception := io.in.exception || !legal
-  io.out.cause := Mux(io.in.exception, io.in.cause, Mux(!legal, FaultCode.illegal, FaultCode.none))
+  io.out.cause := Mux(io.in.exception, io.in.cause,
+    Mux(!legal, FaultCode.illegal, FaultCode.none))
   io.out.badAddr := Mux(io.in.exception, io.in.badAddr, Mux(!legal, inst, 0.U))
   io.out.writesRd := destination && io.out.rd =/= 0.U && !io.out.exception
   io.out.barrier := io.out.fu === FuType.bru || io.out.fu === FuType.system || io.out.exception
   when(io.out.exception) {
     io.out.usesRs1 := false.B
     io.out.usesRs2 := false.B
+    io.out.writesV := false.B
+    io.out.usesV1 := false.B
+    io.out.usesV2 := false.B
+    io.out.usesVOld := false.B
+    io.out.usesVMask := false.B
   }
 }

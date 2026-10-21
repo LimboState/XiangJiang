@@ -1,6 +1,6 @@
 # XiangJiang Scalar ISA
 
-本文定义 XiangJiangNPU 当前标量实现的 **33 条指令**：21 条整数计算、8 条分支／跳转、`LW`、`SW`、`FENCE` 和自定义 `HALT`。编码和整数语义采用 RV32I 的明确子集，**不是完整 RV32I 实现，也不宣称符合完整 RISC-V 平台规范**。整体执行策略以 [sketchNPU.md](sketchNPU.md) §2.1、§4.5–4.7 为准；本文补充当前标量实现的合法编码、异常边界与软件约定，不定义向量／矩阵指令。
+本文定义 XiangJiangNPU 当前标量实现的 **33 条指令**：21 条整数计算、8 条分支／跳转、`LW`、`SW`、`FENCE` 和自定义 `HALT`。编码和整数语义采用 RV32I 的明确子集，**不是完整 RV32I 实现，也不宣称符合完整 RISC-V 平台规范**。整体执行策略以 [SketchNPU.md](SketchNPU.md) §2.1、§4.5–4.7 为准；本文补充当前标量实现的合法编码、异常边界与软件约定，不定义向量／矩阵指令。
 
 ## 1. 基本约定
 
@@ -167,13 +167,13 @@ SRAI  x7, x6, 31       # x7 = 0xFFFFFFFF
 | 指令 | 形式 | 合法编码 | 作用 |
 | --- | --- | --- | --- |
 | `FENCE` | `FENCE pred, succ` | `opcode=0x0F, funct3=000` | 保守全局内存屏障：等待更早指令提交及更早访存／事务完成，提交后继续 `PC+4` |
-| `HALT` | `HALT`（可用 `.word 0x00000000`） | **仅完整机器字 `0x00000000`** | 阻塞后续派发，等待更早提交、活跃访存、功能单元／结果缓冲及事务排空；提交后正常终止本次运行 |
+| `HALT` | `HALT`（可用 `.word 0x0000000B`） | **仅完整机器字 `0x0000000B`**；`opcode=0x0B`（RISC-V `custom-0`） | 阻塞后续派发，等待更早提交、活跃访存、功能单元／结果缓冲及事务排空；提交后正常终止本次运行 |
 
 FENCE 编码字段为 `fm=inst[31:28]`、`pred=inst[27:24]`、`succ=inst[23:20]`、`rs1=inst[19:15]`、`rd=inst[11:7]`。`pred/succ` 四位分别为 I/O/R/W（bit 3/2/1/0）。本实现接受所有这些字段值，包括非零保留 `fm/rs1/rd`，忽略其操作数依赖与目的写入，统一执行完整屏障；排序可强于指定集合，不能更弱。标准允许基础实现保守处理保留 FENCE 配置。`FENCE.TSO`／`PAUSE` 若编码落在此类，也按完整屏障处理，不另计助记符，不提供额外性能语义。
 
 `FENCE` 不是 ALU 空操作，不进行缓存维护，不支持 `FENCE.I`（其 `funct3=001`）。当前标量-only 配置没有向量、矩阵或 DMA 引擎；全局屏障覆盖所有当前实际存在的内存工作，不声称存在那些引擎。
 
-`HALT` 是本项目的非标准扩展：全零编码在标准 RISC-V 中非法。它不是 `ECALL/EBREAK/WFI`，也不是复位。普通终止及后续启动保留已提交寄存器值；复位时寄存器清零，TCM 内容不被架构性清零。预取看到零字不能立刻结束运行，未进入有效指令流或已被取消的零字不产生终止效果。
+`HALT` 是本项目的非标准扩展，使用 RISC-V 保留给自定义扩展的 `custom-0` opcode 空间；本实现只接受完整机器字 `0x0000000B`，其他 `custom-0` 编码均为非法指令。全零字仍按标准作为非法指令处理。`HALT` 不是 `ECALL/EBREAK/WFI`，也不是复位。普通终止及后续启动保留已提交寄存器值；复位时寄存器清零，TCM 内容不被架构性清零。预取到 HALT 编码不能立刻结束运行；未进入有效指令流或已被取消的 HALT 不产生终止效果。
 
 ## 8. 非法指令与故障
 
@@ -207,7 +207,7 @@ FENCE 编码字段为 `fm=inst[31:28]`、`pred=inst[27:24]`、`succ=inst[23:20]`
 
 | 常用写法 | 展开 | 注意 |
 | --- | --- | --- |
-| `NOP` | `ADDI x0, x0, 0`，机器字 `0x00000013` | 不是全零 HALT |
+| `NOP` | `ADDI x0, x0, 0`，机器字 `0x00000013` | 与 HALT 编码不同 |
 | `MV rd, rs` | `ADDI rd, rs, 0` | 捕获旧源版本 |
 | `NOT rd, rs` | `XORI rd, rs, -1` | 立即数扩展到 `0xFFFFFFFF` |
 | `NEG rd, rs` | `SUB rd, x0, rs` | `0x80000000` 取负仍为自身 |
@@ -219,10 +219,10 @@ ALU 接受已捕获的源位模式，不能在执行时重新读取架构寄存�
 
 ## 10. 参考与核对范围
 
-- [XiangJiang 架构草案](sketchNPU.md)：§2.1 的 33 条标量指令、§3.2 的 TCM、§4 的提交／控制转移／屏障；项目专有行为优先以此及本文标量平台约定为准。
+- [XiangJiang 架构草案](SketchNPU.md)：§2.1 的 33 条标量指令、§3.2 的 TCM、§4 的提交／控制转移／屏障；项目专有行为优先以此及本文标量平台约定为准。
 - [RISC-V Unprivileged ISA，20260120，RV32I Version 2.1](https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html)：寄存器模型、立即数、整数运算、分支／跳转、访存与 FENCE 的规范语义；已逐类核对，特别注意 SLTIU 符号扩展、JALR 低位清除与目标故障归属。
 - [RISC-V 官方 riscv-opcodes：rv_i](https://github.com/riscv/riscv-opcodes/blob/master/extensions/rv_i)：R/I/S/B/U/J 指令及 FENCE 的编码字段；此链接跟随上游 master，本文给出的具体字段才是本实现固定契约。
 - [RISC-V 官方 riscv-opcodes：rv32_i](https://github.com/riscv/riscv-opcodes/blob/master/extensions/rv32_i)：RV32 SLLI/SRLI/SRAI 的完整 `inst[31:25]` 合法值。
-- [RISC-V 指令长度编码约定](https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html)：全零位模式保留为非法编码；本项目 HALT 是明确的非标准选择。
+- [RISC-V 指令长度编码约定](https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html)：全零位模式保留为非法编码；本项目 HALT 使用 `custom-0` 编码空间。
 
 文档采用 Vector_ISA 的中文约定表／指令表风格，但不导入其尚未实现的向量功能，也不以标准 RV32I 的完整支持范围替代本项目子集。

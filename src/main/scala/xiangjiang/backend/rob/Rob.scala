@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 import xiangjiang._
 
-/** In-order retirement with independently allocated scalar result storage. */
+/** In-order retirement with independent scalar and vector result pools. */
 class Rob(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val allocate = Flipped(Decoupled(new MicroOp(p)))
@@ -16,12 +16,15 @@ class Rob(p: XJParams) extends Module {
     val wbAccepted = Output(Bool())
     val query = Input(Vec(2, new RobTag(p)))
     val values = Output(Vec(2, new Operand(p)))
+    val vectorQuery = Input(Vec(4, new RobTag(p)))
+    val vectorValues = Output(Vec(4, new VectorOperand(p)))
     val flush = Input(Bool())
     val quiescent = Input(Bool())
     val empty = Output(Bool())
   })
 
   private val resultBits = log2Ceil(p.nXRes)
+  private val vectorResultBits = log2Ceil(p.nVRes)
   private val maxGeneration = ((BigInt(1) << p.generationBits) - 1).U
   private val maxSequence = ((BigInt(1) << p.seqBits) - 1).U
   val valid = RegInit(VecInit(Seq.fill(p.nRob)(false.B)))
@@ -29,12 +32,16 @@ class Rob(p: XJParams) extends Module {
   val uops = Reg(Vec(p.nRob, new MicroOp(p)))
   val hasResult = Reg(Vec(p.nRob, Bool()))
   val resultIndex = Reg(Vec(p.nRob, UInt(resultBits.W)))
+  val hasVectorResult = Reg(Vec(p.nRob, Bool()))
+  val vectorResultIndex = Reg(Vec(p.nRob, UInt(vectorResultBits.W)))
   val exception = Reg(Vec(p.nRob, Bool()))
   val cause = Reg(Vec(p.nRob, UInt(4.W)))
   val badAddr = Reg(Vec(p.nRob, UInt(32.W)))
   val nextPc = Reg(Vec(p.nRob, UInt(32.W)))
   val resultUsed = RegInit(VecInit(Seq.fill(p.nXRes)(false.B)))
   val resultData = Reg(Vec(p.nXRes, UInt(32.W)))
+  val vectorResultUsed = RegInit(VecInit(Seq.fill(p.nVRes)(false.B)))
+  val vectorResultData = Reg(Vec(p.nVRes, UInt(512.W)))
 
   val headIndex = RegInit(0.U(p.robBits.W))
   val tailIndex = RegInit(0.U(p.robBits.W))
@@ -43,26 +50,33 @@ class Rob(p: XJParams) extends Module {
   val generationExhausted = RegInit(VecInit(Seq.fill(p.nRob)(false.B)))
   val nextSequence = RegInit(0.U(p.seqBits.W))
   val sequenceExhausted = RegInit(false.B)
+  def increment(index: UInt): UInt =
+    Mux(index === (p.nRob - 1).U, 0.U, index + 1.U)
 
   val needsResult = io.allocate.bits.writesRd && io.allocate.bits.rd =/= 0.U &&
     !io.allocate.bits.exception
   val freeResults = ~resultUsed.asUInt
   val freeResultIndex = Wire(UInt(resultBits.W))
   freeResultIndex := PriorityEncoder(freeResults)
+  val needsVectorResult = io.allocate.bits.writesV && !io.allocate.bits.exception
+  val freeVectorResults = ~vectorResultUsed.asUInt
+  val freeVectorResultIndex = Wire(UInt(vectorResultBits.W))
+  freeVectorResultIndex := PriorityEncoder(freeVectorResults)
   val mustDrain = sequenceExhausted || generationExhausted(tailIndex)
   io.empty := count === 0.U
   io.allocTag.slot := tailIndex
   io.allocTag.generation := nextGeneration(tailIndex)
   io.allocSeq := nextSequence
   io.allocate.ready := !io.flush && !mustDrain && count =/= p.nRob.U &&
-    (!needsResult || freeResults.orR)
+    (!needsResult || freeResults.orR) && (!needsVectorResult || freeVectorResults.orR)
 
   io.head.valid := !io.empty && !io.flush
   io.head.bits := uops(headIndex)
   io.retire.valid := io.head.valid && done(headIndex)
   io.retire.bits.uop := uops(headIndex)
-  io.retire.bits.data := Mux(hasResult(headIndex) && !exception(headIndex),
-    resultData(resultIndex(headIndex)), 0.U)
+  io.retire.bits.data := Mux(exception(headIndex), 0.U,
+    Mux(hasVectorResult(headIndex), vectorResultData(vectorResultIndex(headIndex)),
+      Mux(hasResult(headIndex), resultData(resultIndex(headIndex)), 0.U)))
   io.retire.bits.exception := exception(headIndex)
   io.retire.bits.cause := cause(headIndex)
   io.retire.bits.badAddr := badAddr(headIndex)
@@ -80,6 +94,14 @@ class Rob(p: XJParams) extends Module {
     io.values(port).ready := readable
     io.values(port).value := Mux(readable, resultData(resultIndex(slot)), 0.U)
   }
+  for (port <- 0 until 4) {
+    val slot = io.vectorQuery(port).slot
+    val readable = !io.flush && valid(slot) && done(slot) && hasVectorResult(slot) &&
+      !exception(slot) && TagMatch(uops(slot).tag, io.vectorQuery(port))
+    io.vectorValues(port).tag := io.vectorQuery(port)
+    io.vectorValues(port).ready := readable
+    io.vectorValues(port).value := Mux(readable, vectorResultData(vectorResultIndex(slot)), 0.U)
+  }
 
   when(io.wbAccepted) {
     done(wbSlot) := true.B
@@ -88,16 +110,22 @@ class Rob(p: XJParams) extends Module {
     badAddr(wbSlot) := io.wb.bits.badAddr
     nextPc(wbSlot) := io.wb.bits.nextPc
     when(hasResult(wbSlot) && !io.wb.bits.exception) {
-      resultData(resultIndex(wbSlot)) := io.wb.bits.data
+      resultData(resultIndex(wbSlot)) := io.wb.bits.data(31, 0)
+    }
+    when(hasVectorResult(wbSlot) && !io.wb.bits.exception) {
+      vectorResultData(vectorResultIndex(wbSlot)) := io.wb.bits.data
     }
   }
 
   when(io.retire.fire) {
     valid(headIndex) := false.B
     done(headIndex) := false.B
-    headIndex := headIndex + 1.U
+    headIndex := increment(headIndex)
     when(hasResult(headIndex)) {
       resultUsed(resultIndex(headIndex)) := false.B
+    }
+    when(hasVectorResult(headIndex)) {
+      vectorResultUsed(vectorResultIndex(headIndex)) := false.B
     }
   }
 
@@ -107,13 +135,18 @@ class Rob(p: XJParams) extends Module {
     uops(tailIndex) := io.allocate.bits
     hasResult(tailIndex) := needsResult
     resultIndex(tailIndex) := freeResultIndex
+    hasVectorResult(tailIndex) := needsVectorResult
+    vectorResultIndex(tailIndex) := freeVectorResultIndex
     exception(tailIndex) := io.allocate.bits.exception
     cause(tailIndex) := io.allocate.bits.cause
     badAddr(tailIndex) := io.allocate.bits.badAddr
     nextPc(tailIndex) := io.allocate.bits.pc + 4.U
-    tailIndex := tailIndex + 1.U
+    tailIndex := increment(tailIndex)
     when(needsResult) {
       resultUsed(freeResultIndex) := true.B
+    }
+    when(needsVectorResult) {
+      vectorResultUsed(freeVectorResultIndex) := true.B
     }
     when(nextGeneration(tailIndex) === maxGeneration) {
       generationExhausted(tailIndex) := true.B
@@ -146,6 +179,7 @@ class Rob(p: XJParams) extends Module {
     valid.foreach(_ := false.B)
     done.foreach(_ := false.B)
     resultUsed.foreach(_ := false.B)
+    vectorResultUsed.foreach(_ := false.B)
     count := 0.U
   }
 }

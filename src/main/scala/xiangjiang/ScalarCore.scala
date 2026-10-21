@@ -3,14 +3,14 @@ package xiangjiang
 import chisel3._
 import chisel3.util._
 import xiangjiang.backend.decode.DecodeUnit
-import xiangjiang.backend.fu.{ALUUnit, BranchUnit}
+import xiangjiang.backend.fu.{ALUUnit, BranchUnit, VectorUnit}
 import xiangjiang.backend.issue.IssueUnit
 import xiangjiang.backend.rename.RenameStage
 import xiangjiang.backend.rob.Rob
 import xiangjiang.frontend.Frontend
 import xiangjiang.mem.LSU
 
-/** Single-dispatch scalar core: value renaming, multiple FU issue, ordered commit. */
+/** Single-dispatch scalar/vector core with value renaming and ordered commit. */
 class ScalarCore(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val start = Input(Bool())
@@ -21,6 +21,7 @@ class ScalarCore(p: XJParams) extends Module {
     val dataResp = Flipped(Decoupled(new WordResp))
     val status = Output(new CoreStatus)
     val debugRegs = Output(Vec(32, UInt(32.W)))
+    val debugVRegs = Output(Vec(32, UInt(512.W)))
     val retire = Output(Valid(new CommitRecord(p)))
     val writeback = Output(Valid(new ExeResult(p)))
     val aluIssued = Output(Valid(new RobTag(p)))
@@ -33,8 +34,10 @@ class ScalarCore(p: XJParams) extends Module {
   val rob = Module(new Rob(p))
   val aluIssue = Module(new IssueUnit(p))
   val branchIssue = Module(new IssueUnit(p, headOnly = true))
+  val vectorIssue = Module(new IssueUnit(p, vectorEnabled = true))
   val alu = Module(new ALUUnit(p))
   val branch = Module(new BranchUnit(p))
+  val vector = Module(new VectorUnit(p))
   val lsu = Module(new LSU(p))
 
   val running = RegInit(false.B)
@@ -52,7 +55,7 @@ class ScalarCore(p: XJParams) extends Module {
   val start = io.start && !running && !done && !fault
   val faultDetected = running && !draining && rob.io.retire.valid && rob.io.retire.bits.exception
   val stopIssue = !running || draining || faultDetected
-  val quiescent = !alu.io.busy && !branch.io.busy && lsu.io.quiescent && !systemValid
+  val quiescent = !alu.io.busy && !branch.io.busy && !vector.io.busy && lsu.io.quiescent && !systemValid
   val finishFault = draining && quiescent
   val flush = start || finishFault
   // Fault cleanup discards unissued reservations after completion sources drain.
@@ -61,8 +64,10 @@ class ScalarCore(p: XJParams) extends Module {
   rename.io.flush := flush
   aluIssue.io.flush := flush
   branchIssue.io.flush := flush
+  vectorIssue.io.flush := flush
   alu.io.flush := flush
   branch.io.flush := flush
+  vector.io.flush := flush
   lsu.io.flush := flush
   lsu.io.stop := stopIssue
 
@@ -82,12 +87,17 @@ class ScalarCore(p: XJParams) extends Module {
   rob.io.query := rename.io.lookupTags
   rename.io.lookupValues := rob.io.values
   io.debugRegs := rename.io.debugRegs
+  rob.io.vectorQuery := rename.io.vectorLookupTags
+  rename.io.vectorLookupValues := rob.io.vectorValues
+  io.debugVRegs := rename.io.debugVRegs
 
   val isAlu = uop.fu === FuType.alu && !uop.exception
   val isBranch = uop.fu === FuType.bru && !uop.exception
   val isMemory = uop.fu === FuType.mem && !uop.exception
+  val isVector = uop.fu === FuType.vector && !uop.exception
   val targetReady = (!isAlu || aluIssue.io.dispatch.ready) &&
-    (!isBranch || branchIssue.io.dispatch.ready) && (!isMemory || lsu.io.allocate.ready)
+    (!isBranch || branchIssue.io.dispatch.ready) && (!isMemory || lsu.io.allocate.ready) &&
+    (!isVector || vectorIssue.io.dispatch.ready)
   val dispatch = frontend.io.fetch.valid && !stopIssue && !flush && rob.io.allocate.ready && targetReady
   frontend.io.fetch.ready := !stopIssue && !flush && rob.io.allocate.ready && targetReady
   // Each participant observes valid only when the entire allocation can succeed.
@@ -98,10 +108,12 @@ class ScalarCore(p: XJParams) extends Module {
   aluIssue.io.dispatch.bits := rename.io.renamed
   branchIssue.io.dispatch.valid := dispatch && isBranch
   branchIssue.io.dispatch.bits := rename.io.renamed
+  vectorIssue.io.dispatch.valid := dispatch && isVector
+  vectorIssue.io.dispatch.bits := rename.io.renamed
   lsu.io.allocate.valid := dispatch && isMemory
   lsu.io.allocate.bits := rename.io.renamed
 
-  for (issue <- Seq(aluIssue, branchIssue)) {
+  for (issue <- Seq(aluIssue, branchIssue, vectorIssue)) {
     issue.io.head.valid := rob.io.head.valid
     issue.io.head.bits := rob.io.head.bits.tag
   }
@@ -113,6 +125,9 @@ class ScalarCore(p: XJParams) extends Module {
   branch.io.req.valid := branchIssue.io.issue.valid && !stopIssue
   branch.io.req.bits := branchIssue.io.issue.bits
   branchIssue.io.issue.ready := branch.io.req.ready && !stopIssue
+  vector.io.req.valid := vectorIssue.io.issue.valid && !stopIssue
+  vector.io.req.bits := vectorIssue.io.issue.bits
+  vectorIssue.io.issue.ready := vector.io.req.ready && !stopIssue
   io.aluIssued.valid := alu.io.req.fire
   io.aluIssued.bits := alu.io.req.bits.uop.tag
   io.aguIssued := lsu.io.addressIssued
@@ -122,7 +137,8 @@ class ScalarCore(p: XJParams) extends Module {
   val systemAtHead = rob.io.head.valid && rob.io.head.bits.fu === FuType.system &&
     !rob.io.head.bits.exception
   when(systemAtHead && !systemSent && !stopIssue && lsu.io.empty &&
-    !alu.io.busy && !branch.io.busy && aluIssue.io.empty && branchIssue.io.empty) {
+    !alu.io.busy && !branch.io.busy && !vector.io.busy &&
+    aluIssue.io.empty && branchIssue.io.empty && vectorIssue.io.empty) {
     systemResult := 0.U.asTypeOf(new ExeResult(p))
     systemResult.tag := rob.io.head.bits.tag
     systemResult.seq := rob.io.head.bits.seq
@@ -131,31 +147,33 @@ class ScalarCore(p: XJParams) extends Module {
     systemSent := true.B
   }
 
-  val completion = Wire(Vec(4, Decoupled(new ExeResult(p))))
+  val completion = Wire(Vec(5, Decoupled(new ExeResult(p))))
   completion(0) <> alu.io.resp
   completion(1) <> branch.io.resp
   completion(2) <> lsu.io.result
-  completion(3).valid := systemValid
-  completion(3).bits := systemResult
-  when(completion(3).fire) { systemValid := false.B }
-  val have = Wire(Vec(5, Bool()))
-  val pick = Wire(Vec(5, UInt(2.W)))
+  completion(3) <> vector.io.resp
+  completion(4).valid := systemValid
+  completion(4).bits := systemResult
+  when(completion(4).fire) { systemValid := false.B }
+  val have = Wire(Vec(6, Bool()))
+  val pick = Wire(Vec(6, UInt(3.W)))
   have(0) := false.B
   pick(0) := 0.U
-  for (i <- 0 until 4) {
+  for (i <- 0 until 5) {
     val take = completion(i).valid && (!have(i) || completion(i).bits.seq < completion(pick(i)).bits.seq)
     have(i + 1) := have(i) || completion(i).valid
     pick(i + 1) := Mux(take, i.U, pick(i))
-    completion(i).ready := have(4) && pick(4) === i.U
+    completion(i).ready := have(5) && pick(5) === i.U
   }
-  rob.io.wb.valid := have(4)
-  rob.io.wb.bits := completion(pick(4)).bits
+  rob.io.wb.valid := have(5)
+  rob.io.wb.bits := completion(pick(5)).bits
   val broadcast = Wire(Valid(new ExeResult(p)))
   broadcast.valid := rob.io.wbAccepted
   broadcast.bits := rob.io.wb.bits
   rename.io.wakeup := broadcast
   aluIssue.io.wakeup := broadcast
   branchIssue.io.wakeup := broadcast
+  vectorIssue.io.wakeup := broadcast
   lsu.io.wakeup := broadcast
   io.writeback := broadcast
 

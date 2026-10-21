@@ -52,8 +52,8 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
     (BigInt(f7) << 25) | (2 << 20) | (1 << 15) | (f3 << 12) | (rd << 7) | 0x33
   private def i(imm: Int, f3: Int = 0, opcode: Int = 0x13, rd: Int = 3, rs1: Int = 1): BigInt =
     (BigInt(imm & 0xfff) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | opcode
-  private def s(imm: Int): BigInt =
-    (BigInt((imm & 0xfff) >> 5) << 25) | (2 << 20) | (1 << 15) | (2 << 12) | ((imm & 31) << 7) | 0x23
+  private def s(imm: Int, f3: Int = 2): BigInt =
+    (BigInt((imm & 0xfff) >> 5) << 25) | (2 << 20) | (1 << 15) | (f3 << 12) | ((imm & 31) << 7) | 0x23
   private def b(imm: Int, f3: Int = 0): BigInt = {
     val x = imm & 0x1fff
     (BigInt((x >> 12) & 1) << 31) | (((x >> 5) & 63) << 25) | (2 << 20) |
@@ -66,7 +66,7 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
   }
   private def u(imm: Int, opcode: Int): BigInt = (BigInt(imm & 0xfffff) << 12) | (3 << 7) | opcode
 
-  test("decode all 33 mnemonics and exact source destination barrier metadata") {
+  test("decode the 33 supported scalar instructions plus custom HALT with exact metadata") {
     simulate(new DecodeUnit(p)) { c =>
       c.io.in.pc.poke(0x100)
       c.io.in.exception.poke(false)
@@ -84,14 +84,14 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         ri.map { case (f3, imm, op) => (i(imm, f3), op, FuType.alu, true, false, true, true,
           if (f3 == 1 || f3 == 5) BigInt(31) else mask) } ++
         Seq((u(0xabcde, 0x37), UOpCode.LUI, FuType.alu, false, false, true, true, BigInt("abcde000", 16)),
-          (u(0xabcde, 0x17), UOpCode.AUIPC, FuType.alu, false, false, true, true, BigInt("abcde000", 16)),
-          (i(-4, 2, 3), UOpCode.LW, FuType.mem, true, false, true, true, word(-4)),
-          (s(-4), UOpCode.SW, FuType.mem, true, true, false, true, word(-4))) ++
+          (u(0xabcde, 0x17), UOpCode.AUIPC, FuType.alu, false, false, true, true, BigInt("abcde000", 16))) ++
+        Seq((i(-4, 2, 3), UOpCode.LW, FuType.mem, true, false, true, true, word(-4)),
+          (s(-4, 2), UOpCode.SW, FuType.mem, true, true, false, true, word(-4))) ++
         branches.map { case (f3, op) => (b(-4, f3), op, FuType.bru, true, true, false, false, word(-4)) } ++
         Seq((j(-4), UOpCode.JAL, FuType.bru, false, false, true, true, word(-4)),
           (i(-4, 0, 0x67), UOpCode.JALR, FuType.bru, true, false, true, true, word(-4)),
           (BigInt("ffff8f8f", 16), UOpCode.FENCE, FuType.system, false, false, false, false, BigInt(0)),
-          (BigInt(0), UOpCode.HALT, FuType.system, false, false, false, false, BigInt(0)))
+          (Rv32.halt, UOpCode.HALT, FuType.system, false, false, false, false, BigInt(0)))
       assert(cases.size == 33)
       for ((inst, op, fu, rs1, rs2, rd, useImm, imm) <- cases) {
         c.io.in.inst.poke(inst)
@@ -146,15 +146,36 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
       }
       for (f3 <- 0 until 8; opcode <- Seq(3, 0x23, 0x63, 0x67, 0x0f)) {
         val legal = opcode match {
-          case 3 | 0x23 => f3 == 2
+          case 3 => f3 == 2
+          case 0x23 => f3 == 2
           case 0x63 => f3 != 2 && f3 != 3
           case _ => f3 == 0
         }
         c.io.in.inst.poke(i(0, f3, opcode))
         c.io.out.exception.expect(!legal)
       }
-      for (inst <- Seq(BigInt(1), BigInt(2), BigInt(4), BigInt(0x73), BigInt(0x100073),
-                        BigInt(0x1073), BigInt(0x100f), BigInt(0x2f), BigInt(0x53), BigInt(0x57), mask)) {
+      // There is no privileged or environment-call subset: every SYSTEM word is illegal.
+      val systems = (0 until 4096).map(imm => i(imm, 0, 0x73, rd = 0, rs1 = 0)) ++
+        (for (imm <- Seq(0, 1); f3 <- 0 until 8; rd <- Seq(0, 1, 31); rs1 <- Seq(0, 1, 31))
+          yield i(imm, f3, 0x73, rd, rs1))
+      for (inst <- systems) {
+        c.io.in.inst.poke(inst)
+        c.io.out.exception.expect(true)
+        c.io.out.cause.expect(1)
+        c.io.out.badAddr.expect(inst)
+        c.io.out.writesRd.expect(false)
+        c.io.out.usesRs1.expect(false); c.io.out.usesRs2.expect(false)
+        c.io.out.barrier.expect(true)
+      }
+      // Byte/halfword accesses, other custom-0 words and the all-zero word are illegal.
+      val illegal = Seq(BigInt(0), BigInt(1), BigInt(2), BigInt(4),
+        i(0, 0, 3, rd = 20, rs1 = 1), i(0, 1, 3, rd = 20, rs1 = 1),
+        i(0, 4, 3, rd = 20, rs1 = 1), i(0, 5, 3, rd = 20, rs1 = 1),
+        s(0, 0), s(0, 1), BigInt(0x200073),
+        BigInt(0xf3), BigInt(0x8073), BigInt(0x1000f3), BigInt(0x108073),
+        BigInt(0x1073), BigInt(0x100f), BigInt(0x2f), BigInt(0x53),
+        Rv32.halt | 0x80, Rv32.halt | (BigInt(1) << 26), Rv32.halt | (BigInt(1) << 12), mask)
+      for (inst <- illegal) {
         c.io.in.inst.poke(inst)
         c.io.out.exception.expect(true)
         c.io.out.cause.expect(1)
@@ -162,11 +183,11 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         c.io.out.barrier.expect(true)
         c.io.out.writesRd.expect(false)
       }
-      // An access failure wins even when the returned instruction is HALT or illegal.
+      // An access failure wins over HALT and any illegal machine word.
       c.io.in.exception.poke(true)
       c.io.in.cause.poke(3)
       c.io.in.badAddr.poke(0x80000)
-      for (inst <- Seq(BigInt(0), mask, i(1))) {
+      for (inst <- Seq(BigInt(0), Rv32.halt, mask, i(1))) {
         c.io.in.inst.poke(inst)
         c.io.out.exception.expect(true)
         c.io.out.cause.expect(3)

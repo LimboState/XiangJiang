@@ -32,6 +32,14 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     port.usesRs1.poke(uses1.B)
     port.usesRs2.poke(uses2.B)
     port.writesRd.poke((rd != 0 && !exception).B)
+    port.vecOp.poke(0.U)
+    port.writesV.poke(false.B)
+    port.usesV1.poke(false.B)
+    port.usesV2.poke(false.B)
+    port.usesVOld.poke(false.B)
+    port.usesVMask.poke(false.B)
+    port.maskReg.poke(0.U)
+    port.unmasked.poke(true.B)
     port.imm.poke(0.U)
     port.useImm.poke(false.B)
     port.barrier.poke(exception.B)
@@ -46,6 +54,11 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     port.ready.poke(ready.B)
     port.value.poke(value.U)
     pokeTag(port.tag, tag)
+  }
+  private def pokeVectorOperand(port: VectorOperand, ready: Boolean = true): Unit = {
+    port.ready.poke(ready.B)
+    port.value.poke(0.U)
+    pokeTag(port.tag, Tag(0, 0))
   }
   private def pokeResult(port: ExeResult, allocation: Allocation = Allocation(Tag(0, 0), 0),
       data: BigInt = 0, exception: Boolean = false): Unit = {
@@ -73,6 +86,7 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     dut.io.wb.valid.poke(false.B)
     pokeResult(dut.io.wb.bits)
     dut.io.query.foreach(pokeTag(_, Tag(0, 0)))
+    dut.io.vectorQuery.foreach(pokeTag(_, Tag(0, 0)))
     dut.io.flush.poke(false.B)
     dut.io.quiescent.poke(false.B)
     dut.reset.poke(true.B)
@@ -310,6 +324,7 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     pokeUop(dut.io.uop)
     dut.io.dispatch.poke(false.B)
     dut.io.lookupValues.foreach(pokeOperand(_, ready = false))
+    dut.io.vectorLookupValues.foreach(pokeVectorOperand(_, ready = false))
     dut.io.wakeup.valid.poke(false.B)
     pokeResult(dut.io.wakeup.bits)
     dut.io.commit.valid.poke(false.B)
@@ -446,6 +461,7 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
       uses1 = true, uses2 = true)
     pokeOperand(port.src1, src1Ready, 100 + allocation.seq, src1Tag)
     pokeOperand(port.src2, src2Ready, 200 + allocation.seq, src2Tag)
+    Seq(port.vsrc1, port.vsrc2, port.vold, port.vmask).foreach(pokeVectorOperand(_))
   }
   private def initIssue(dut: IssueUnit): Unit = {
     dut.io.dispatch.valid.poke(false.B)

@@ -5,7 +5,7 @@ import chisel3.util._
 import device.{Axi4Slave, AxiLiteSlave, ControlRegisters, MemorySubsystem}
 import xiangjiang._
 
-/** Scalar-only XiangJiang NPU with separate host control and memory AXI slaves. */
+/** XiangJiang scalar/vector NPU with separate host control and memory AXI slaves. */
 class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   val io = IO(new Bundle {
     val control = new AxiLiteSlave
@@ -13,6 +13,7 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
     val status = Output(new CoreStatus)
     val retire = Output(Valid(new CommitRecord(p)))
     val debugRegs = Output(Vec(32, UInt(32.W)))
+    val debugVRegs = Output(Vec(32, UInt(512.W)))
   })
 
   val core = Module(new ScalarCore(p))
@@ -33,4 +34,5 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   io.status := core.io.status
   io.retire := core.io.retire
   io.debugRegs := core.io.debugRegs
+  io.debugVRegs := core.io.debugVRegs
 }

@@ -7,11 +7,11 @@ object UOpCode extends ChiselEnum {
   val ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU,
       ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU,
       LUI, AUIPC, LW, SW, BEQ, BNE, BLT, BGE, BLTU, BGEU,
-      JAL, JALR, FENCE, HALT = Value
+      JAL, JALR, FENCE, HALT, VECTOR = Value
 }
 
 object FuType extends ChiselEnum {
-  val alu, mem, bru, system = Value
+  val alu, mem, bru, system, vector = Value
 }
 
 // Local host fault codes, not privileged RISC-V mcause CSRs.
@@ -24,6 +24,70 @@ object FaultCode {
   val loadAccess = 5.U(4.W)
   val storeAlign = 6.U(4.W)
   val storeAccess = 7.U(4.W)
+}
+
+/** Implementation-defined vector operation identifiers.
+  *
+  * The vector encoding is intentionally not RVV-compatible.  The low two bits
+  * of the identifier select one of four vector opcodes, bit 2..4 form funct3,
+  * and the remaining bit is inst[25].  For the paired arithmetic, logical,
+  * comparison and floating-point operations an even identifier is the
+  * vector-vector form and an odd identifier is the vector-scalar form.
+  * Permutation, conversion, reduction, special-function and memory identifiers
+  * are standalone.
+  */
+object VecOp {
+  val vadd = 0
+  val vsub = 2
+  val vmul = 4
+  val vmax = 6
+  val vmin = 8
+  val vand = 10
+  val vor = 12
+  val vxor = 14
+  val vsll = 16
+  val vsrl = 18
+  val vsra = 20
+
+  val vfadd = 22
+  val vfsub = 24
+  val vfmul = 26
+  val vfdiv = 28
+  val vfmacc = 30
+  val vfmax = 32
+  val vfmin = 34
+
+  val vmseq = 36
+  val vmslt = 38
+  val vmsle = 40
+  val vmsltu = 42
+  val vmsleu = 44
+  val vmfeq = 46
+  val vmflt = 48
+  val vmfle = 50
+
+  val vslideup = 52
+  val vslideupImm = 53
+  val vslidedown = 54
+  val vslidedownImm = 55
+  val vmerge = 56
+  val vrgather = 57
+  val vunary = 58
+  val vle32 = 59
+  val vse32 = 60
+  val vle16 = 61
+  val vse16 = 62
+
+  // Selector values carried in rs1 for VecOp.vunary.
+  val uWiden = 0
+  val uNarrow = 1
+  val uIntToFloat = 2
+  val uFloatToInt = 3
+  val uFredSum = 4
+  val uFredMax = 5
+  val uExp = 6
+  val uRcp = 7
+  val uRsqrt = 8
 }
 
 class RobTag(p: XJParams) extends Bundle {
@@ -42,6 +106,14 @@ class MicroOp(p: XJParams) extends Bundle {
   val usesRs1 = Bool()
   val usesRs2 = Bool()
   val writesRd = Bool()
+  val vecOp = UInt(6.W)
+  val writesV = Bool()
+  val usesV1 = Bool()
+  val usesV2 = Bool()
+  val usesVOld = Bool()
+  val usesVMask = Bool()
+  val maskReg = UInt(5.W)
+  val unmasked = Bool()
   val imm = UInt(32.W)
   val useImm = Bool()
   val barrier = Bool()
@@ -58,16 +130,26 @@ class Operand(p: XJParams) extends Bundle {
   val tag = new RobTag(p)
 }
 
+class VectorOperand(p: XJParams) extends Bundle {
+  val ready = Bool()
+  val value = UInt(512.W)
+  val tag = new RobTag(p)
+}
+
 class IssueEntry(p: XJParams) extends Bundle {
   val uop = new MicroOp(p)
   val src1 = new Operand(p)
   val src2 = new Operand(p)
+  val vsrc1 = new VectorOperand(p)
+  val vsrc2 = new VectorOperand(p)
+  val vold = new VectorOperand(p)
+  val vmask = new VectorOperand(p)
 }
 
 class ExeResult(p: XJParams) extends Bundle {
   val tag = new RobTag(p)
   val seq = UInt(p.seqBits.W)
-  val data = UInt(32.W)
+  val data = UInt(512.W)
   val exception = Bool()
   val cause = UInt(4.W)
   val badAddr = UInt(32.W)
@@ -76,7 +158,7 @@ class ExeResult(p: XJParams) extends Bundle {
 
 class CommitRecord(p: XJParams) extends Bundle {
   val uop = new MicroOp(p)
-  val data = UInt(32.W)
+  val data = UInt(512.W)
   val exception = Bool()
   val cause = UInt(4.W)
   val badAddr = UInt(32.W)

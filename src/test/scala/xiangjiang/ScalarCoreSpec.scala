@@ -83,12 +83,18 @@ class ScalarCoreSpec extends AnyFunSuite with ChiselSim {
     }
   }
 
-  test("records a delayed memory error and blocks younger stores before restart") {
-    val p = XJParams()
-    simulate(new ScalarCore(p)) { dut =>
-      import Rv32._
-      // The older bad load blocks memory successors; no later write may start.
-      val program = Seq(addi(1, 0, 19), lw(2, 0, 0), addi(3, 0, 23), sw(3, 0, 64), halt)
+  test("prechecks aligned word accesses and blocks younger stores on a precise fault") {
+    val p = XJParams(bankBytes = 128)
+    import Rv32._
+    val cases = Seq(
+      (lw(2, 0, 2), 4, 2, false),
+      (lw(0, 0, 2), 4, 2, false),
+      (lw(2, 0, p.dtcmBytes), 5, p.dtcmBytes, false),
+      (sw(1, 0, 2), 6, 2, true),
+      (sw(1, 0, p.dtcmBytes), 7, p.dtcmBytes, true))
+    for ((faulting, cause, address, store) <- cases) simulate(new ScalarCore(p)) { dut =>
+      // The older failed access blocks memory successors; no later write may start.
+      val program = Seq(addi(1, 0, 19), faulting, addi(3, 0, 23), sw(3, 0, 64), halt)
       dut.io.start.poke(false); dut.io.ack.poke(false)
       dut.io.fetchReq.ready.poke(true); dut.io.fetchResp.valid.poke(false)
       dut.io.fetchResp.bits.pc.poke(0); dut.io.fetchResp.bits.inst.poke(0)
@@ -96,31 +102,23 @@ class ScalarCoreSpec extends AnyFunSuite with ChiselSim {
       dut.io.fetchResp.bits.badAddr.poke(0)
       dut.io.dataReq.ready.poke(true); dut.io.dataResp.valid.poke(false)
       dut.io.dataResp.bits.data.poke(0); dut.io.dataResp.bits.error.poke(true)
-      var delay = -1
       var requests = 0
       var cycles = 0
       def tick(): Unit = {
         val f = if (dut.io.fetchReq.valid.peek().litToBoolean)
           Some(dut.io.fetchReq.bits.peek().litValue.toInt) else None
-        if (dut.io.dataReq.valid.peek().litToBoolean) {
-          dut.io.dataReq.bits.write.expect(false)
-          requests += 1
-          assert(requests == 1)
-          delay = 30
-        }
-        if (dut.io.dataResp.valid.peek().litToBoolean && dut.io.dataResp.ready.peek().litToBoolean) delay = -1
+        if (dut.io.dataReq.valid.peek().litToBoolean) requests += 1
         dut.clock.step(); cycles += 1
         dut.io.fetchResp.valid.poke(f.isDefined)
         f.foreach { pc => dut.io.fetchResp.bits.pc.poke(pc); dut.io.fetchResp.bits.inst.poke(program(pc / 4)) }
-        if (delay > 0) delay -= 1
-        dut.io.dataResp.valid.poke(delay == 0)
       }
       dut.io.start.poke(true); tick(); dut.io.start.poke(false)
       while ((!dut.io.status.fault.peek().litToBoolean || dut.io.status.busy.peek().litToBoolean) && cycles < 500) tick()
       dut.io.status.busy.expect(false); dut.io.status.fault.expect(true)
-      dut.io.status.faultPc.expect(4); dut.io.status.faultCause.expect(5)
+      dut.io.status.faultPc.expect(4); dut.io.status.faultCause.expect(cause)
+      dut.io.status.faultInst.expect(faulting); dut.io.status.faultAddr.expect(address)
       dut.io.debugRegs(1).expect(19); dut.io.debugRegs(2).expect(0); dut.io.debugRegs(3).expect(0)
-      assert(requests == 1)
+      assert(requests == 0, s"faulting $faulting issued $requests memory requests")
       dut.io.ack.poke(true); tick(); dut.io.ack.poke(false)
       dut.io.status.fault.expect(false)
     }
