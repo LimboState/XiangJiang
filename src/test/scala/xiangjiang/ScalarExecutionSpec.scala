@@ -173,7 +173,7 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         i(0, 4, 3, rd = 20, rs1 = 1), i(0, 5, 3, rd = 20, rs1 = 1),
         s(0, 0), s(0, 1), BigInt(0x200073),
         BigInt(0xf3), BigInt(0x8073), BigInt(0x1000f3), BigInt(0x108073),
-        BigInt(0x1073), BigInt(0x100f), BigInt(0x2f), BigInt(0x53),
+        BigInt(0x1073), BigInt(0x100f), BigInt(0x53),
         Rv32.halt | 0x80, Rv32.halt | (BigInt(1) << 26), Rv32.halt | (BigInt(1) << 12), mask)
       for (inst <- illegal) {
         c.io.in.inst.poke(inst)

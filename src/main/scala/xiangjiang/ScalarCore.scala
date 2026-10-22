@@ -3,7 +3,7 @@ package xiangjiang
 import chisel3._
 import chisel3.util._
 import xiangjiang.backend.decode.DecodeUnit
-import xiangjiang.backend.fu.{ALUUnit, BranchUnit, VectorUnit}
+import xiangjiang.backend.fu.{ALUUnit, BranchUnit, MatrixUnit, VectorUnit}
 import xiangjiang.backend.issue.IssueUnit
 import xiangjiang.backend.rename.RenameStage
 import xiangjiang.backend.rob.Rob
@@ -19,6 +19,8 @@ class ScalarCore(p: XJParams) extends Module {
     val fetchResp = Input(Valid(new FetchPacket))
     val dataReq = Decoupled(new WordReq)
     val dataResp = Flipped(Decoupled(new WordResp))
+    val matrixReq = Decoupled(new MatrixBeatReq)
+    val matrixResp = Flipped(Decoupled(new MatrixBeatResp))
     val status = Output(new CoreStatus)
     val debugRegs = Output(Vec(32, UInt(32.W)))
     val debugVRegs = Output(Vec(32, UInt(512.W)))
@@ -38,6 +40,7 @@ class ScalarCore(p: XJParams) extends Module {
   val alu = Module(new ALUUnit(p))
   val branch = Module(new BranchUnit(p))
   val vector = Module(new VectorUnit(p))
+  val matrix = Module(new MatrixUnit(p))
   val lsu = Module(new LSU(p))
 
   val running = RegInit(false.B)
@@ -55,7 +58,8 @@ class ScalarCore(p: XJParams) extends Module {
   val start = io.start && !running && !done && !fault
   val faultDetected = running && !draining && rob.io.retire.valid && rob.io.retire.bits.exception
   val stopIssue = !running || draining || faultDetected
-  val quiescent = !alu.io.busy && !branch.io.busy && !vector.io.busy && lsu.io.quiescent && !systemValid
+  val quiescent = !alu.io.busy && !branch.io.busy && !vector.io.busy && !matrix.io.busy &&
+    lsu.io.quiescent && !systemValid
   val finishFault = draining && quiescent
   val flush = start || finishFault
   // Fault cleanup discards unissued reservations after completion sources drain.
@@ -68,6 +72,7 @@ class ScalarCore(p: XJParams) extends Module {
   alu.io.flush := flush
   branch.io.flush := flush
   vector.io.flush := flush
+  matrix.io.flush := flush
   lsu.io.flush := flush
   lsu.io.stop := stopIssue
 
@@ -93,10 +98,10 @@ class ScalarCore(p: XJParams) extends Module {
 
   val isAlu = uop.fu === FuType.alu && !uop.exception
   val isBranch = uop.fu === FuType.bru && !uop.exception
-  val isMemory = uop.fu === FuType.mem && !uop.exception
   val isVector = uop.fu === FuType.vector && !uop.exception
+  val isMatrixTask = (uop.fu === FuType.mem || uop.fu === FuType.matrix) && !uop.exception
   val targetReady = (!isAlu || aluIssue.io.dispatch.ready) &&
-    (!isBranch || branchIssue.io.dispatch.ready) && (!isMemory || lsu.io.allocate.ready) &&
+    (!isBranch || branchIssue.io.dispatch.ready) && (!isMatrixTask || lsu.io.allocate.ready) &&
     (!isVector || vectorIssue.io.dispatch.ready)
   val dispatch = frontend.io.fetch.valid && !stopIssue && !flush && rob.io.allocate.ready && targetReady
   frontend.io.fetch.ready := !stopIssue && !flush && rob.io.allocate.ready && targetReady
@@ -110,7 +115,7 @@ class ScalarCore(p: XJParams) extends Module {
   branchIssue.io.dispatch.bits := rename.io.renamed
   vectorIssue.io.dispatch.valid := dispatch && isVector
   vectorIssue.io.dispatch.bits := rename.io.renamed
-  lsu.io.allocate.valid := dispatch && isMemory
+  lsu.io.allocate.valid := dispatch && isMatrixTask
   lsu.io.allocate.bits := rename.io.renamed
 
   for (issue <- Seq(aluIssue, branchIssue, vectorIssue)) {
@@ -133,11 +138,15 @@ class ScalarCore(p: XJParams) extends Module {
   io.aguIssued := lsu.io.addressIssued
   io.dataReq <> lsu.io.request
   lsu.io.response <> io.dataResp
+  lsu.io.matrixTask <> matrix.io.task
+  lsu.io.matrixDone := matrix.io.done
+  io.matrixReq <> matrix.io.memReq
+  matrix.io.memResp <> io.matrixResp
 
   val systemAtHead = rob.io.head.valid && rob.io.head.bits.fu === FuType.system &&
     !rob.io.head.bits.exception
   when(systemAtHead && !systemSent && !stopIssue && lsu.io.empty &&
-    !alu.io.busy && !branch.io.busy && !vector.io.busy &&
+    !alu.io.busy && !branch.io.busy && !vector.io.busy && !matrix.io.busy &&
     aluIssue.io.empty && branchIssue.io.empty && vectorIssue.io.empty) {
     systemResult := 0.U.asTypeOf(new ExeResult(p))
     systemResult.tag := rob.io.head.bits.tag
@@ -183,6 +192,10 @@ class ScalarCore(p: XJParams) extends Module {
   commit.bits := rob.io.retire.bits
   rename.io.commit := commit
   io.retire := commit
+  matrix.io.config.valid := commit.valid && commit.bits.uop.op === UOpCode.MATRIX &&
+    commit.bits.uop.matOp === MatOp.msetmode
+  matrix.io.config.bits.unit := commit.bits.uop.matUnit
+  matrix.io.config.bits.mode := commit.bits.uop.matMode
   when(commit.valid && commit.bits.uop.barrier) {
     systemSent := false.B
     when(commit.bits.uop.op === UOpCode.HALT) {

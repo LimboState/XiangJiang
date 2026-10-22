@@ -9,7 +9,7 @@ object VectorEncoding {
   def instruction(id: Int, rd: Int, rs1: Int, rs2: Int,
                   mask: Option[Int] = None): BigInt = {
     require(id >= 0 && id < 64)
-    val opcode = Seq(0x57, 0x2b, 0x5b, 0x7b)(id & 3)
+    val opcode = Seq(0x57, 0x07, 0x27, 0x2f)(id & 3)
     (BigInt(mask.getOrElse(0)) << 27) | (if (mask.isEmpty) BigInt(1) << 26 else BigInt(0)) |
       (BigInt(id >> 5) << 25) | ((rs2 & 31) << 20) | (rs1 << 15) |
       (((id >> 2) & 7) << 12) | (rd << 7) | opcode

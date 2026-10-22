@@ -31,6 +31,8 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   core.io.fetchResp := tcm.io.fetchResp
   tcm.io.dataReq <> core.io.dataReq
   core.io.dataResp <> tcm.io.dataResp
+  tcm.io.matrixReq <> core.io.matrixReq
+  core.io.matrixResp <> tcm.io.matrixResp
   io.status := core.io.status
   io.retire := core.io.retire
   io.debugRegs := core.io.debugRegs

@@ -7,11 +7,19 @@ object UOpCode extends ChiselEnum {
   val ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU,
       ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU,
       LUI, AUIPC, LW, SW, BEQ, BNE, BLT, BGE, BLTU, BGEU,
-      JAL, JALR, FENCE, HALT, VECTOR = Value
+      JAL, JALR, FENCE, HALT, VECTOR, MATRIX = Value
 }
 
 object FuType extends ChiselEnum {
-  val alu, mem, bru, system, vector = Value
+  val alu, mem, bru, system, vector, matrix = Value
+}
+
+/** Matrix ISA operation identifiers.  MLOAD/MSTORE are memory-class tasks,
+  * MMUL/MMACC/MEW/MTRANS and MWAIT are ordered matrix tasks, and the remaining
+  * operations are control barriers handled at the ROB head.
+  */
+object MatOp extends ChiselEnum {
+  val msetmode, mload, mstore, mmul, mmacc, mew, mtrans, mwait, mbarrier, mfence = Value
 }
 
 // Local host fault codes, not privileged RISC-V mcause CSRs.
@@ -24,6 +32,11 @@ object FaultCode {
   val loadAccess = 5.U(4.W)
   val storeAlign = 6.U(4.W)
   val storeAccess = 7.U(4.W)
+  // Matrix faults are intentionally distinct from scalar load/store codes.
+  val matrixLoadAlign = 8.U(4.W)
+  val matrixLoadAccess = 9.U(4.W)
+  val matrixStoreAlign = 10.U(4.W)
+  val matrixStoreAccess = 11.U(4.W)
 }
 
 /** Implementation-defined vector operation identifiers.
@@ -116,6 +129,11 @@ class MicroOp(p: XJParams) extends Bundle {
   val unmasked = Bool()
   val imm = UInt(32.W)
   val useImm = Bool()
+  val matOp = MatOp()
+  val matUnit = UInt(2.W)
+  val matBuffer = UInt(2.W)
+  val matMode = Bool()
+  val matId = UInt(5.W)
   val barrier = Bool()
   val exception = Bool()
   val cause = UInt(4.W)
@@ -171,6 +189,34 @@ class FetchPacket extends Bundle {
   val exception = Bool()
   val cause = UInt(4.W)
   val badAddr = UInt(32.W)
+}
+
+/** One 64-byte matrix DTCM beat.  Addresses are 64-byte aligned and the
+  * full beat must lie inside DTCM; write beats always cover all 64 bytes.
+  */
+class MatrixBeatReq extends Bundle {
+  val addr = UInt(32.W)
+  val data = UInt(512.W)
+  val write = Bool()
+  val mask = UInt(64.W)
+}
+
+class MatrixBeatResp extends Bundle {
+  val data = UInt(512.W)
+}
+
+/** Parameters for one ordered matrix task handed from LSU to MatrixUnit. */
+class MatrixTask extends Bundle {
+  val op = MatOp()
+  val unit = UInt(2.W)
+  val buffer = UInt(2.W)
+  val addr = UInt(32.W)
+}
+
+/** MSETMODE configuration command from the commit controller. */
+class MatrixConfig extends Bundle {
+  val unit = UInt(2.W)
+  val mode = Bool()
 }
 
 class WordReq extends Bundle {

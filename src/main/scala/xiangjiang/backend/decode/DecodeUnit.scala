@@ -95,12 +95,78 @@ class DecodeUnit(p: XJParams) extends Module {
     decode(UOpCode.HALT, FuType.system, false, false, false, 0.U, false)
   }
 
-  // Vector opcodes deliberately use OP-V plus the three custom opcode groups.
-  // custom-0 is reserved for the exact HALT word above.
-  val customOpcode = opcode === "h57".U || opcode === "h2b".U ||
-    opcode === "h5b".U || opcode === "h7b".U
+  // Matrix instructions own custom-1/custom-2/custom-3 with funct3 <= 3.
+  // Vector uses OP-V and the unused AMO opcode for its fourth group so that
+  // custom-1/custom-3 only carry vector encodings in funct3 4..7.
+  val matrixDomain = opcode === "h5b".U ||
+    ((opcode === "h2b".U || opcode === "h7b".U) && funct3 <= 3.U)
+  val matUnitField = funct3(1, 0)
+  val matUnitLegal = matUnitField =/= 3.U
+  def decodeMatrix(matOp: MatOp.Type, fu: FuType.Type, rs1: Boolean,
+                   barrier: Boolean): Unit = {
+    legal := true.B
+    io.out.op := UOpCode.MATRIX
+    io.out.fu := fu
+    io.out.usesRs1 := rs1.B
+    io.out.usesRs2 := false.B
+    io.out.matOp := matOp
+    io.out.matUnit := matUnitField
+    io.out.barrier := barrier.B
+  }
+  when(matrixDomain) {
+    when(opcode === "h2b".U) {
+      when(!matUnitLegal) {
+        legal := false.B
+      }.elsewhen(inst(31, 25) === 0.U && inst(24, 21) === 0.U &&
+        inst(19, 15) === 0.U && inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.msetmode, FuType.system, false, true)
+        io.out.matMode := inst(20)
+        // The BF16 unit only supports output-stationary dataflow.
+        when(matUnitField === 0.U && inst(20)) { legal := false.B }
+      }.elsewhen(inst(31, 27) === 1.U && inst(26, 25) =/= 3.U &&
+        inst(24, 20) === 0.U && inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.mload, FuType.mem, true, false)
+        io.out.matBuffer := inst(26, 25)
+      }.elsewhen(inst(31, 25) === "b0001000".U && inst(24, 20) === 0.U &&
+        inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.mstore, FuType.mem, true, false)
+      }
+    }
+    when(opcode === "h5b".U) {
+      when(!matUnitLegal || inst(19, 15) =/= 0.U || inst(24, 20) =/= 0.U ||
+        inst(11, 7) =/= 0.U || inst(31, 25) > 3.U) {
+        legal := false.B
+      }.otherwise {
+        val computeOp = MuxLookup(inst(31, 25), MatOp.mmul)(Seq(
+          0.U(7.W) -> MatOp.mmul, 1.U(7.W) -> MatOp.mmacc,
+          2.U(7.W) -> MatOp.mew, 3.U(7.W) -> MatOp.mtrans))
+        decodeMatrix(computeOp, FuType.matrix, false, false)
+      }
+    }
+    when(opcode === "h7b".U) {
+      when(funct3 === 0.U && inst(31, 30) =/= 3.U && inst(29, 25) === 0.U &&
+        inst(24, 20) === 0.U && inst(19, 15) === 0.U && inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.mwait, FuType.matrix, false, false)
+        io.out.matUnit := inst(31, 30)
+      }.elsewhen(funct3 === 1.U && inst(31, 15) === 0.U && inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.mfence, FuType.system, false, true)
+      }.elsewhen(funct3 === 2.U && inst(26, 25) === 0.U && inst(24, 20) === 0.U &&
+        inst(19, 15) === 0.U && inst(11, 7) === 0.U) {
+        decodeMatrix(MatOp.mbarrier, FuType.system, false, true)
+        io.out.matId := inst(31, 27)
+      }.otherwise {
+        legal := false.B
+      }
+    }
+  }
+
+  // Vector opcodes deliberately use OP-V and three otherwise-unused major
+  // opcodes (LOAD-FP, STORE-FP, AMO).  custom-1/custom-2/custom-3 are owned
+  // by the matrix domain, and custom-0 is reserved for the exact HALT word.
+  val customOpcode = opcode === "h57".U || opcode === "h07".U ||
+    opcode === "h27".U || opcode === "h2f".U
   val customIndex = MuxLookup(opcode, 0.U(2.W))(Seq(
-    "h57".U -> 0.U, "h2b".U -> 1.U, "h5b".U -> 2.U, "h7b".U -> 3.U))
+    "h57".U -> 0.U, "h07".U -> 1.U, "h27".U -> 2.U, "h2f".U -> 3.U))
   val vecOp = Cat(inst(25), funct3, customIndex)
   val unary = vecOp === VecOp.vunary.U
   val selector = inst(19, 15)
@@ -109,7 +175,7 @@ class DecodeUnit(p: XJParams) extends Module {
   val vectorStore = vecOp === VecOp.vse32.U || vecOp === VecOp.vse16.U
   val merge = vecOp === VecOp.vmerge.U
   val unaryLegal = selector <= VecOp.uRsqrt.U
-  when(customOpcode && vecOp =/= 63.U && (!unary || unaryLegal) && (!merge || !inst(26))) {
+  when(customOpcode && !matrixDomain && vecOp =/= 63.U && (!unary || unaryLegal) && (!merge || !inst(26))) {
     legal := true.B
     io.out.op := UOpCode.VECTOR
     io.out.fu := Mux(vectorMemory, FuType.mem, FuType.vector)
