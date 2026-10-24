@@ -35,7 +35,7 @@ object Rv32 {
 }
 
 class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
-  test("executes host-loaded programs with ordered commits, barriers, precise faults and restart") {
+  test("executes host-loaded programs with ordered commits, barriers, precise faults and restart using deterministic Verilator initialization") {
     val p = XJParams(nRob = 4, nIssue = 1, nXRes = 1, nMemq = 1,
       generationBits = 1, seqBits = 4, bankBytes = 128)
     simulate(new XiangJiangNPU(p)) { dut =>

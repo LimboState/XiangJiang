@@ -32,6 +32,8 @@ object Generate extends App {
   "sequenceBits": ${p.seqBits},
   "axiAddressBits": 32,
   "axiDataBits": 32,
+  "dmaAddressBits": 64,
+  "dmaDataBits": 128,
   "axiIdBits": ${p.axiIdBits}
 }
 """

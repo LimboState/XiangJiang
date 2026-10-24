@@ -10,8 +10,19 @@ class ControlRegisters(p: XJParams) extends Module {
     val axi = new AxiLiteSlave
     val status = Input(new CoreStatus)
     val hostIdle = Input(Bool())
+    val dmaBusy = Input(Bool())
+    val dmaDone = Input(Bool())
+    val dmaError = Input(Bool())
+    val dmaErrorCode = Input(UInt(4.W))
+    val dmaErrorAddr = Input(UInt(64.W))
     val start = Output(Bool())
     val ack = Output(Bool())
+    val dmaStart = Output(Bool())
+    val dmaClear = Output(Bool())
+    val dmaDirection = Output(Bool())
+    val dmaHostAddr = Output(UInt(64.W))
+    val dmaLocalAddr = Output(UInt(32.W))
+    val dmaLength = Output(UInt(32.W))
     val debugRegs = Input(Vec(32, UInt(32.W)))
   })
   val awValid = RegInit(false.B)
@@ -20,6 +31,14 @@ class ControlRegisters(p: XJParams) extends Module {
   val w = Reg(new LiteWriteData)
   val bValid = RegInit(false.B)
   val b = Reg(UInt(2.W))
+  val dmaHostAddrLowReg = RegInit(0.U(32.W))
+  val dmaHostAddrHighReg = RegInit(0.U(32.W))
+  val dmaLocalAddrReg = RegInit(0.U(32.W))
+  val dmaLengthReg = RegInit(0.U(32.W))
+  val dmaDirectionReg = RegInit(false.B)
+  val dmaWriteMask = Cat((0 until 4).reverse.map(lane => Fill(8, w.strb(lane))))
+  def mergeStrobedWrite(oldValue: UInt): UInt =
+    (oldValue & ~dmaWriteMask) | (w.data & dmaWriteMask)
   io.axi.aw.ready := !awValid && !bValid
   io.axi.w.ready := !wValid && !bValid
   when(io.axi.aw.fire) { aw := io.axi.aw.bits; awValid := true.B }
@@ -30,13 +49,25 @@ class ControlRegisters(p: XJParams) extends Module {
 
   io.start := false.B
   io.ack := false.B
-  val requestStart = w.strb(0) && w.data(0)
-  val requestAck = w.strb(0) && w.data(1)
+  io.dmaStart := false.B
+  io.dmaClear := false.B
+  io.dmaDirection := dmaDirectionReg
+  io.dmaHostAddr := Cat(dmaHostAddrHighReg, dmaHostAddrLowReg)
+  io.dmaLocalAddr := dmaLocalAddrReg.asUInt
+  io.dmaLength := dmaLengthReg.asUInt
+  val requestStart = aw.addr === 0.U && w.strb(0) && w.data(0)
+  val requestAck = aw.addr === 0.U && w.strb(0) && w.data(1)
   val allowedStart = !io.status.busy && !io.status.done && !io.status.fault && io.hostIdle
   val allowedAck = !io.status.busy
-  val writeError = aw.addr =/= 0.U ||
+  val dmaAddress = aw.addr === "h80".U || aw.addr === "h84".U || aw.addr === "h88".U ||
+    aw.addr === "h8c".U || aw.addr === "h90".U
+  val dmaConfigWrite = dmaAddress && !requestStart
+  val dmaStartRequest = aw.addr === "h90".U && w.strb(0) && w.data(0)
+  val writeError = (!dmaAddress && aw.addr =/= 0.U) ||
     (requestStart && requestAck) || (requestStart && !allowedStart) ||
-    (requestAck && !allowedAck)
+    (requestAck && !allowedAck) ||
+    (dmaConfigWrite && (io.status.busy || io.dmaBusy)) ||
+    (dmaStartRequest && (io.status.busy || io.dmaBusy || !io.hostIdle))
   when(awValid && wValid && !bValid) {
     awValid := false.B
     wValid := false.B
@@ -44,6 +75,21 @@ class ControlRegisters(p: XJParams) extends Module {
     b := Mux(writeError, 2.U, 0.U)
     io.start := !writeError && requestStart
     io.ack := !writeError && requestAck
+    io.dmaStart := !writeError && dmaStartRequest
+    io.dmaClear := !writeError && aw.addr === "h90".U && w.strb(0) && w.data(1)
+    when(!writeError && dmaConfigWrite && aw.addr === "h80".U) {
+      dmaHostAddrLowReg := mergeStrobedWrite(dmaHostAddrLowReg)
+    }
+    when(!writeError && dmaConfigWrite && aw.addr === "h84".U) {
+      dmaHostAddrHighReg := mergeStrobedWrite(dmaHostAddrHighReg)
+    }
+    when(!writeError && dmaConfigWrite && aw.addr === "h88".U) {
+      dmaLocalAddrReg := mergeStrobedWrite(dmaLocalAddrReg)
+    }
+    when(!writeError && dmaConfigWrite && aw.addr === "h8c".U) {
+      dmaLengthReg := mergeStrobedWrite(dmaLengthReg)
+    }
+    when(!writeError && aw.addr === "h90".U && w.strb(0)) { dmaDirectionReg := w.data(2) }
   }
 
   val rValid = RegInit(false.B)
@@ -69,8 +115,17 @@ class ControlRegisters(p: XJParams) extends Module {
     is("h28".U) { readData := p.nMemq.U }
     is("h2c".U) { readData := p.nIssue.U }
     is("h30".U) { readData := 1.U }
+    is("h80".U) { readData := dmaHostAddrLowReg }
+    is("h84".U) { readData := dmaHostAddrHighReg }
+    is("h88".U) { readData := dmaLocalAddrReg }
+    is("h8c".U) { readData := dmaLengthReg }
+    is("h90".U) { readData := Cat(0.U(29.W), io.dmaError, io.dmaBusy, io.dmaDirection) }
+    is("h94".U) { readData := Cat(0.U(28.W), io.dmaErrorCode) }
+    is("h98".U) { readData := io.dmaErrorAddr(31, 0) }
+    is("h9c".U) { readData := io.dmaErrorAddr(63, 32) }
+    is("ha0".U) { readData := Cat(0.U(31.W), io.dmaDone) }
   }
-  known := address <= "h30".U || (address >= "h100".U && address <= "h17c".U)
+  known := (address <= "h30".U) || (address >= "h80".U && address <= "ha0".U) || (address >= "h100".U && address <= "h17c".U)
   when(address >= "h100".U && address <= "h17c".U) {
     readData := io.debugRegs(address(6, 2))
   }
