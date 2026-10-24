@@ -19,9 +19,37 @@ matrix domain defined by `docs/Matrix_ISA.md`.
 - Host: AXI4-Full memory slave and AXI4-Lite control/status registers.
 
 ```bash
-./mill xj.test
+PATH="$PWD/scripts/verilator-5.052-xinit-zero:/opt/verilator-5.052/bin:$PATH" ./mill xj.test
 ./mill xj.runMain top.Generate generated
+```
+
+`XiangJiangNPUSpec` needs Verilator's initial-X values forced to zero on this
+toolchain. Run that test with the repository wrapper so the installed 5.052
+binary is used with the required option:
+
+```bash
+PATH="$PWD/scripts/verilator-5.052-xinit-zero:/opt/verilator-5.052/bin:$PATH" \
+  /usr/local/bin/mill --no-server xj.test.testOnly xiangjiang.XiangJiangNPUSpec
 ```
 
 `top.Generate` emits split SystemVerilog, verification layers, `filelist.f`,
 and `xiangjiang-config.json` under the selected output directory.
+
+Standalone FPGA synthesis uses the Windows Vivado 2021.2 installation from WSL:
+
+```bash
+cd /home/zhang/XiangJiang-LimboState-2
+/usr/local/bin/mill --no-server xj.runMain top.Generate generated
+python3 scripts/run-vivado-synth.py
+```
+
+The runner uses `D:\Xilinx\Vivado\2021.2\bin\vivado.bat`, snapshots the current
+RTL under `D:\xj-synthesis`, and copies logs and reports back to
+`out/vivado-synth/limbostate2-*/`. Input hashes are saved in `inputs.json`.
+Use `--vivado /mnt/.../vivado.bat` or `--stage-dir /mnt/...` to change these paths.
+The Tcl script synthesizes `XiangJiangNPU` out of context for
+`xczu9eg-ffvb1156-2-e` with a 10 ns clock and two synthesis threads.
+It reports utilization, timing, unconstrained paths and DRC results, and writes
+a checkpoint and netlist. These are FPGA estimates before placement;
+board I/O constraints, implementation, bitstream generation and ASIC mapping
+require their respective flows. The existing debug outputs are included.

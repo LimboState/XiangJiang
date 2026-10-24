@@ -55,3 +55,38 @@ class AxiLiteSlave extends Bundle {
   val ar = Flipped(Decoupled(new LiteAddress))
   val r = Decoupled(new LiteReadData)
 }
+
+class DmaAxiAddress extends Bundle {
+  val id = UInt(4.W)
+  val addr = UInt(64.W)
+  val len = UInt(8.W)
+  val size = UInt(3.W)
+  val burst = UInt(2.W)
+}
+
+class DmaAxiWriteData extends Bundle {
+  val data = UInt(128.W)
+  val strb = UInt(16.W)
+  val last = Bool()
+}
+
+class DmaAxiWriteResponse extends Bundle {
+  val id = UInt(4.W)
+  val resp = UInt(2.W)
+}
+
+class DmaAxiReadData extends Bundle {
+  val id = UInt(4.W)
+  val data = UInt(128.W)
+  val resp = UInt(2.W)
+  val last = Bool()
+}
+
+/** AXI master used by the on-chip DMA to reach external memory. */
+class DmaAxiMaster extends Bundle {
+  val aw = Decoupled(new DmaAxiAddress)
+  val w = Decoupled(new DmaAxiWriteData)
+  val b = Flipped(Decoupled(new DmaAxiWriteResponse))
+  val ar = Decoupled(new DmaAxiAddress)
+  val r = Flipped(Decoupled(new DmaAxiReadData))
+}

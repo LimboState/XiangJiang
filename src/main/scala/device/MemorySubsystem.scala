@@ -14,7 +14,10 @@ class MemorySubsystem(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val axi = new Axi4Slave(p.axiIdBits)
     val coreBusy = Input(Bool())
+    val dmaBusy = Input(Bool())
     val hostIdle = Output(Bool())
+    val dmaReq = Flipped(Decoupled(new DmaLocalRequest))
+    val dmaResp = Decoupled(new DmaLocalResponse)
     val fetchReq = Flipped(Decoupled(UInt(32.W)))
     val fetchResp = Output(Valid(new FetchPacket))
     val dataReq = Flipped(Decoupled(new WordReq))
@@ -72,12 +75,12 @@ class MemorySubsystem(p: XJParams) extends Module {
     aw := io.axi.aw.bits
     wAddress := io.axi.aw.bits.addr
     wBeat := 0.U
-    wError := burstError(io.axi.aw.bits) || io.coreBusy
+    wError := burstError(io.axi.aw.bits) || io.coreBusy || io.dmaBusy
   }
   when(io.axi.w.fire) {
     wValid := true.B
     w := io.axi.w.bits
-    wBusy := io.coreBusy
+    wBusy := io.coreBusy || io.dmaBusy
   }
   when(io.axi.b.fire) { bValid := false.B }
 
@@ -97,7 +100,7 @@ class MemorySubsystem(p: XJParams) extends Module {
     ar := io.axi.ar.bits
     rAddress := io.axi.ar.bits.addr
     rBeat := 0.U
-    rError := burstError(io.axi.ar.bits) || io.coreBusy
+    rError := burstError(io.axi.ar.bits) || io.coreBusy || io.dmaBusy
   }
   when(io.axi.r.fire) {
     rValid := false.B
@@ -105,6 +108,7 @@ class MemorySubsystem(p: XJParams) extends Module {
       .otherwise { rBeat := rBeat + 1.U; rAddress := nextAddress(ar, rAddress) }
   }
   io.hostIdle := !awValid && !wValid && !bValid && !arValid && !rValid && !rPending &&
+    !io.dmaBusy &&
     !io.axi.aw.valid && !io.axi.w.valid && !io.axi.ar.valid
 
   // Fetch consumes precisely one cycle, including faults (which never touch SRAM).
@@ -163,6 +167,28 @@ class MemorySubsystem(p: XJParams) extends Module {
   }
 
   val coreDataAccess = dataAccess || matrixAccess
+  val dmaReadPending = RegInit(false.B)
+  val dmaReadValid = RegInit(false.B)
+  val dmaReadBank = Reg(UInt(2.W))
+  val dmaReadQuarter = Reg(UInt(2.W))
+  val dmaReadData = Reg(UInt(128.W))
+  val hostBusy = awValid || wValid || bValid || arValid || rValid || rPending
+  io.dmaReq.ready := !io.coreBusy && !coreDataAccess &&
+    !hostBusy && !dmaReadPending && !dmaReadValid
+  io.dmaResp.valid := dmaReadValid
+  io.dmaResp.bits.data := dmaReadData
+  io.dmaResp.bits.error := false.B
+  when(io.dmaResp.fire) { dmaReadValid := false.B }
+  when(io.dmaReq.fire && !io.dmaReq.bits.write) {
+    dmaReadPending := true.B
+    dmaReadBank := io.dmaReq.bits.addr(7, 6)
+    dmaReadQuarter := io.dmaReq.bits.addr(5, 4)
+  }
+  when(dmaReadPending) {
+    dmaReadValid := true.B
+    dmaReadData := (dtcm.io.readData(dmaReadBank) >> Cat(dmaReadQuarter, 0.U(7.W)))(127, 0)
+    dmaReadPending := false.B
+  }
   val badWriteBeat = wBusy || io.coreBusy ||
     (w.strb & ~lanes(aw.size, wAddress)) =/= 0.U || w.last =/= (wBeat === aw.len)
   val writeFault = wError || badWriteBeat
@@ -171,7 +197,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   // Core gets exclusive ITCM access; scalar/matrix DTCM traffic has priority over host.
   val writeGrant = writeWaiting && (writeFault ||
     Mux(writeItcm, !fetchAccess, !coreDataAccess))
-  val hostWrite = writeGrant && !writeFault
+  val hostWrite = writeGrant && !writeFault && !io.dmaBusy
   when(writeGrant) {
     wValid := false.B
     wError := writeFault
@@ -186,7 +212,7 @@ class MemorySubsystem(p: XJParams) extends Module {
     }
   }
 
-  val readFault = rError || io.coreBusy
+  val readFault = rError || io.coreBusy || io.dmaBusy
   val readItcm = rAddress < p.itcmBytes.U
   val sameDtcmRow = wAddress(31, 6) === rAddress(31, 6)
   val readConflict = Mux(readItcm, fetchAccess || (hostWrite && writeItcm),
@@ -199,7 +225,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   val readBank = RegEnable(rAddress(7, 6), readGrant)
   val readWord = RegEnable(rAddress(5, 2), readGrant)
   val readLanes = RegEnable(lanes(ar.size, rAddress), readGrant)
-  when(readGrant && io.coreBusy) { rError := true.B }
+  when(readGrant && (io.coreBusy || io.dmaBusy)) { rError := true.B }
   when(rPending) {
     rValid := true.B
     r.id := ar.id
@@ -218,6 +244,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   itcm.io.mask := w.strb
 
   for (bank <- 0 until 4) {
+    val dmaBankAccess = io.dmaReq.fire && io.dmaReq.bits.addr(7, 6) === bank.U
     val scalarRead = dataAccess && !io.dataReq.bits.write && io.dataReq.bits.addr(7, 6) === bank.U
     val scalarWrite = dataAccess && io.dataReq.bits.write && io.dataReq.bits.addr(7, 6) === bank.U
     val matrixRead = matrixAccess && !io.matrixReq.bits.write && io.matrixReq.bits.addr(7, 6) === bank.U
@@ -225,17 +252,25 @@ class MemorySubsystem(p: XJParams) extends Module {
     val hostBankRead = hostRead && !readItcm && rAddress(7, 6) === bank.U
     val hostBankWrite = hostWrite && !writeItcm && wAddress(7, 6) === bank.U
     val writeAddr = Mux(scalarWrite, io.dataReq.bits.addr,
-      Mux(matrixWrite, io.matrixReq.bits.addr, wAddress - dtcmBase))
+      Mux(matrixWrite, io.matrixReq.bits.addr,
+        Mux(hostBankWrite, wAddress - dtcmBase, io.dmaReq.bits.addr)))
     val readAddr = Mux(scalarRead, io.dataReq.bits.addr,
-      Mux(matrixRead, io.matrixReq.bits.addr, rAddress - dtcmBase))
-    dtcm.io.read(bank).valid := scalarRead || matrixRead || hostBankRead
+      Mux(matrixRead, io.matrixReq.bits.addr,
+        Mux(hostBankRead, rAddress - dtcmBase, io.dmaReq.bits.addr)))
+    dtcm.io.read(bank).valid := scalarRead || matrixRead || hostBankRead ||
+      (dmaBankAccess && !io.dmaReq.bits.write)
     dtcm.io.read(bank).bits.row := readAddr >> 8
-    dtcm.io.write(bank).valid := scalarWrite || matrixWrite || hostBankWrite
+    dtcm.io.write(bank).valid := scalarWrite || matrixWrite || hostBankWrite ||
+      (dmaBankAccess && io.dmaReq.bits.write)
     dtcm.io.write(bank).bits.row := writeAddr >> 8
+    val dmaShift = Cat(io.dmaReq.bits.addr(5, 4), 0.U(7.W))
+    val dmaMask = ("hffff".U(64.W) << dmaShift)(63, 0)
+    val dmaData = (io.dmaReq.bits.data.pad(512) << dmaShift)(511, 0)
     dtcm.io.write(bank).bits.data := Mux(matrixWrite, io.matrixReq.bits.data,
-      Fill(16, Mux(scalarWrite, io.dataReq.bits.data, w.data)))
+      Mux(scalarWrite, Fill(16, io.dataReq.bits.data),
+        Mux(hostBankWrite, Fill(16, w.data), dmaData)))
     dtcm.io.write(bank).bits.mask := Mux(matrixWrite, io.matrixReq.bits.mask,
-      Mux(scalarWrite, io.dataReq.bits.mask, w.strb).pad(64) <<
-        Cat(writeAddr(5, 2), 0.U(2.W)))
+      Mux(scalarWrite, io.dataReq.bits.mask.pad(64) << Cat(writeAddr(5, 2), 0.U(2.W)),
+        Mux(hostBankWrite, w.strb.pad(64) << Cat(writeAddr(5, 2), 0.U(2.W)), dmaMask)))
   }
 }

@@ -337,7 +337,7 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         }
         dut.io.axi.r.ready.poke(true.B); dut.clock.step(); dut.io.axi.r.ready.poke(false.B)
       }
-      def write(addr: Int, value: Int, mask: Int = 15, error: Boolean = false,
+      def write(addr: Int, value: Long, mask: Int = 15, error: Boolean = false,
                 start: Boolean = false, ack: Boolean = false, wFirst: Boolean = false): Unit = {
         dut.io.axi.aw.bits.addr.poke(addr.U)
         dut.io.axi.w.bits.data.poke(value.U); dut.io.axi.w.bits.strb.poke(mask.U)
@@ -379,6 +379,17 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         24 -> p.itcmBytes, 28 -> p.dtcmBytes, 32 -> p.nRob, 36 -> p.nXRes,
         40 -> p.nMemq, 44 -> p.nIssue, 48 -> 1)) read(a, v)
       for (i <- 0 until 32) read(0x100 + i * 4, if (i == 0) 0 else 100 + i)
+      write(0x80, 0x11223344)
+      write(0x80, 0xaabbccddL, mask = 5)
+      read(0x80, BigInt("11bb33dd", 16))
+      write(0x84, 0x12345678, mask = 2)
+      read(0x84, BigInt("00005600", 16))
+      write(0x88, 0x11223344)
+      write(0x88, 0xaabbccddL, mask = 10)
+      read(0x88, BigInt("aa22cc44", 16))
+      write(0x8c, 0x12345678)
+      write(0x8c, 0xaabbccddL, mask = 3)
+      read(0x8c, BigInt("1234ccdd", 16))
       for (a <- Seq(1, 0x34, 0xfc, 0x180)) read(a, 0, error = true)
       for (a <- Seq(1, 4, 0x100, 0x180)) write(a, 1, error = true)
     }
