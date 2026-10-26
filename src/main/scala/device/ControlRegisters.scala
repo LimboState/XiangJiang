@@ -57,17 +57,20 @@ class ControlRegisters(p: XJParams) extends Module {
   io.dmaLength := dmaLengthReg.asUInt
   val requestStart = aw.addr === 0.U && w.strb(0) && w.data(0)
   val requestAck = aw.addr === 0.U && w.strb(0) && w.data(1)
-  val allowedStart = !io.status.busy && !io.status.done && !io.status.fault && io.hostIdle
+  val allowedStart = !io.status.busy && !io.status.done && !io.status.fault &&
+    !io.dmaError && io.hostIdle
   val allowedAck = !io.status.busy
   val dmaAddress = aw.addr === "h80".U || aw.addr === "h84".U || aw.addr === "h88".U ||
     aw.addr === "h8c".U || aw.addr === "h90".U
   val dmaConfigWrite = dmaAddress && !requestStart
   val dmaStartRequest = aw.addr === "h90".U && w.strb(0) && w.data(0)
+  val dmaClearRequest = aw.addr === "h90".U && w.strb(0) && w.data(1)
   val writeError = (!dmaAddress && aw.addr =/= 0.U) ||
     (requestStart && requestAck) || (requestStart && !allowedStart) ||
     (requestAck && !allowedAck) ||
     (dmaConfigWrite && (io.status.busy || io.dmaBusy)) ||
-    (dmaStartRequest && (io.status.busy || io.dmaBusy || !io.hostIdle))
+    (dmaStartRequest && (io.status.busy || io.dmaBusy || !io.hostIdle || io.dmaError)) ||
+    (dmaStartRequest && dmaClearRequest)
   when(awValid && wValid && !bValid) {
     awValid := false.B
     wValid := false.B
@@ -76,7 +79,7 @@ class ControlRegisters(p: XJParams) extends Module {
     io.start := !writeError && requestStart
     io.ack := !writeError && requestAck
     io.dmaStart := !writeError && dmaStartRequest
-    io.dmaClear := !writeError && aw.addr === "h90".U && w.strb(0) && w.data(1)
+    io.dmaClear := !writeError && dmaClearRequest
     when(!writeError && dmaConfigWrite && aw.addr === "h80".U) {
       dmaHostAddrLowReg := mergeStrobedWrite(dmaHostAddrLowReg)
     }
@@ -89,7 +92,11 @@ class ControlRegisters(p: XJParams) extends Module {
     when(!writeError && dmaConfigWrite && aw.addr === "h8c".U) {
       dmaLengthReg := mergeStrobedWrite(dmaLengthReg)
     }
-    when(!writeError && aw.addr === "h90".U && w.strb(0)) { dmaDirectionReg := w.data(2) }
+    when(!writeError && aw.addr === "h90".U && w.strb(0)) {
+      // Forward the accepted direction to DMA on the same edge as START.
+      io.dmaDirection := w.data(2)
+      dmaDirectionReg := w.data(2)
+    }
   }
 
   val rValid = RegInit(false.B)

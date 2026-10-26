@@ -263,9 +263,11 @@ class MemorySubsystem(p: XJParams) extends Module {
     dtcm.io.write(bank).valid := scalarWrite || matrixWrite || hostBankWrite ||
       (dmaBankAccess && io.dmaReq.bits.write)
     dtcm.io.write(bank).bits.row := writeAddr >> 8
-    val dmaShift = Cat(io.dmaReq.bits.addr(5, 4), 0.U(7.W))
-    val dmaMask = ("hffff".U(64.W) << dmaShift)(63, 0)
-    val dmaData = (io.dmaReq.bits.data.pad(512) << dmaShift)(511, 0)
+    // Data shifts count bits; each mask bit enables one byte.
+    val dmaBitShift = Cat(io.dmaReq.bits.addr(5, 4), 0.U(7.W))
+    val dmaByteShift = Cat(io.dmaReq.bits.addr(5, 4), 0.U(4.W))
+    val dmaMask = ("hffff".U(64.W) << dmaByteShift)(63, 0)
+    val dmaData = (io.dmaReq.bits.data.pad(512) << dmaBitShift)(511, 0)
     dtcm.io.write(bank).bits.data := Mux(matrixWrite, io.matrixReq.bits.data,
       Mux(scalarWrite, Fill(16, io.dataReq.bits.data),
         Mux(hostBankWrite, Fill(16, w.data), dmaData)))

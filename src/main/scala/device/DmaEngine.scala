@@ -59,6 +59,9 @@ class DmaEngine(p: XJParams) extends Module {
   val errorCodeReg = RegInit(0.U(4.W))
   val errorAddrReg = RegInit(0.U(64.W))
   val storeDataReg = RegInit(0.U(128.W))
+  val storeBeatPoisoned = RegInit(false.B)
+  val stalledCycles = RegInit(0.U(10.W))
+  val timeoutLimit = 1023.U(10.W)
 
   def burstBeats(addr: UInt, bytes: UInt): UInt = {
     val bytesToPage = 4096.U(64.W) - addr(11, 0)
@@ -99,14 +102,18 @@ class DmaEngine(p: XJParams) extends Module {
   io.axi.ar.bits := 0.U.asTypeOf(new DmaAxiAddress)
   io.axi.r.ready := false.B
 
-  when (io.clear) {
+  val progress = WireDefault(false.B)
+
+  // CLEAR only acknowledges an idle engine; it never cancels a transfer.
+  // Conflicting commands have no effect, including on sticky diagnostics.
+  when (io.clear && !io.start && state === idle) {
     doneReg := false.B
     errorReg := false.B
     errorCodeReg := 0.U
     errorAddrReg := 0.U
   }
 
-  when (io.start && state === idle && !errorReg) {
+  when (io.start && !io.clear && state === idle && !errorReg) {
     doneReg := false.B
     failed := false.B
     direction := io.dir
@@ -119,7 +126,25 @@ class DmaEngine(p: XJParams) extends Module {
       errorAddrReg := io.hostAddr
       doneReg := false.B
     }.otherwise {
-    state := Mux(io.dir, storeAddr, loadAddr)
+      state := Mux(io.dir, storeAddr, loadAddr)
+    }
+  }
+
+  when (state === idle || progress) {
+    stalledCycles := 0.U
+  }.elsewhen (stalledCycles < timeoutLimit) {
+    stalledCycles := stalledCycles + 1.U
+  }
+  when (state =/= idle && !progress && stalledCycles === timeoutLimit) {
+    failed := true.B
+    when (!errorReg) {
+      errorReg := true.B
+      errorCodeReg := 5.U
+      errorAddrReg := Mux(direction, hostCur, hostCur + (beat << 4))
+    }
+    when (state === loadAddr || state === storeAddr) {
+      state := idle
+      doneReg := false.B
     }
   }
 
@@ -132,6 +157,7 @@ class DmaEngine(p: XJParams) extends Module {
       io.axi.ar.bits.len := burstBeats(hostCur, remaining) - 1.U
       io.axi.ar.bits.size := 4.U
       io.axi.ar.bits.burst := 1.U
+      progress := io.axi.ar.fire
       when (io.axi.ar.fire) { beat := 0.U; state := loadData }
     }
     is (loadData) {
@@ -141,13 +167,16 @@ class DmaEngine(p: XJParams) extends Module {
       io.localReq.valid := io.axi.r.valid && !failed && goodResponse
       io.localReq.bits.write := true.B
       io.localReq.bits.data := io.axi.r.bits.data
-      io.axi.r.ready := Mux(failed, true.B, io.localReq.ready)
+      io.axi.r.ready := failed || !goodResponse || io.localReq.ready
+      progress := io.axi.r.fire
       when (io.axi.r.fire) {
         when (!goodResponse) {
           failed := true.B
-          errorReg := true.B
-          errorCodeReg := 2.U // AXI response, ID or RLAST error
-          errorAddrReg := hostCur + (beat << 4)
+          when (!errorReg) {
+            errorReg := true.B
+            errorCodeReg := 2.U // AXI response, ID or RLAST error
+            errorAddrReg := hostCur + (beat << 4)
+          }
         }
         when (io.axi.r.bits.last) {
           when (failed || !goodResponse || remaining === (beats << 4) || !last) {
@@ -170,21 +199,28 @@ class DmaEngine(p: XJParams) extends Module {
       io.axi.aw.bits.len := burstBeats(hostCur, remaining) - 1.U
       io.axi.aw.bits.size := 4.U
       io.axi.aw.bits.burst := 1.U
+      progress := io.axi.aw.fire
       when (io.axi.aw.fire) { beat := 0.U; state := storeRead }
     }
     is (storeRead) {
       io.localReq.valid := true.B
       io.localReq.bits.write := false.B
+      progress := io.localReq.fire
       when (io.localReq.fire) { state := storeReadWait }
     }
     is (storeReadWait) {
+      progress := io.localResp.fire
       when (io.localResp.fire) {
-        storeDataReg := Mux(io.localResp.bits.error, 0.U, io.localResp.bits.data)
+        val poisoned = failed || io.localResp.bits.error
+        storeDataReg := Mux(poisoned, 0.U, io.localResp.bits.data)
+        storeBeatPoisoned := poisoned
         when (io.localResp.bits.error) {
           failed := true.B
-          errorReg := true.B
-          errorCodeReg := 3.U // local DTCM access error
-          errorAddrReg := hostCur
+          when (!errorReg) {
+            errorReg := true.B
+            errorCodeReg := 3.U // local DTCM access error
+            errorAddrReg := hostCur + (beat << 4)
+          }
         }
         state := storeData
       }
@@ -192,9 +228,10 @@ class DmaEngine(p: XJParams) extends Module {
     is (storeData) {
       val last = beat === beats - 1.U
       io.axi.w.valid := true.B
-      io.axi.w.bits.data := storeDataReg
-      io.axi.w.bits.strb := "hffff".U
+      io.axi.w.bits.data := Mux(storeBeatPoisoned, 0.U, storeDataReg)
+      io.axi.w.bits.strb := Mux(storeBeatPoisoned, 0.U, "hffff".U)
       io.axi.w.bits.last := last
+      progress := io.axi.w.fire
       when (io.axi.w.fire) {
         when (last) { state := storeResp }
           .otherwise { beat := beat + 1.U; state := storeRead }
@@ -202,12 +239,15 @@ class DmaEngine(p: XJParams) extends Module {
     }
     is (storeResp) {
       io.axi.b.ready := true.B
+      progress := io.axi.b.fire
       when (io.axi.b.fire) {
         when (io.axi.b.bits.resp =/= 0.U || io.axi.b.bits.id =/= 0.U) {
           failed := true.B
-          errorReg := true.B
-          errorCodeReg := 4.U // AXI write response or ID error
-          errorAddrReg := hostCur
+          when (!errorReg) {
+            errorReg := true.B
+            errorCodeReg := 4.U // AXI write response or ID error
+            errorAddrReg := hostCur
+          }
         }
         when (failed || io.axi.b.bits.resp =/= 0.U || io.axi.b.bits.id =/= 0.U || remaining === (beats << 4)) {
           state := idle

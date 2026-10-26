@@ -22,6 +22,9 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
   }
   private class MemoryDriver(val dut: MemorySubsystem) {
     dut.io.coreBusy.poke(false.B)
+    dut.io.dmaBusy.poke(false.B); dut.io.dmaReq.valid.poke(false.B)
+    dut.io.dmaReq.bits.addr.poke(0.U); dut.io.dmaReq.bits.data.poke(0.U)
+    dut.io.dmaReq.bits.write.poke(false.B); dut.io.dmaResp.ready.poke(false.B)
     dut.io.axi.aw.valid.poke(false.B); dut.io.axi.w.valid.poke(false.B)
     dut.io.axi.ar.valid.poke(false.B); dut.io.axi.b.ready.poke(false.B)
     dut.io.axi.r.ready.poke(false.B)
@@ -320,6 +323,8 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
       dut.io.axi.ar.valid.poke(false.B); dut.io.axi.ar.bits.addr.poke(0.U); dut.io.axi.ar.bits.prot.poke(0.U)
       dut.io.axi.b.ready.poke(false.B); dut.io.axi.r.ready.poke(false.B)
       dut.io.hostIdle.poke(true.B)
+      dut.io.dmaBusy.poke(false.B); dut.io.dmaDone.poke(false.B); dut.io.dmaError.poke(false.B)
+      dut.io.dmaErrorCode.poke(0.U); dut.io.dmaErrorAddr.poke(0.U)
       dut.io.status.busy.poke(false.B); dut.io.status.done.poke(false.B); dut.io.status.fault.poke(false.B)
       dut.io.status.faultPc.poke(20.U); dut.io.status.faultInst.poke(21.U)
       dut.io.status.faultCause.poke(7.U); dut.io.status.faultAddr.poke(23.U)
@@ -375,6 +380,9 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
       write(0, 1, error = true); write(0, 2, error = true)
       read(4, 5)
       dut.io.status.busy.poke(false.B); dut.io.status.fault.poke(false.B)
+      dut.io.dmaError.poke(true.B)
+      write(0, 1, error = true)
+      dut.io.dmaError.poke(false.B)
       for ((a, v) <- Seq(0 -> 0, 4 -> 0, 8 -> 20, 12 -> 21, 16 -> 7, 20 -> 23,
         24 -> p.itcmBytes, 28 -> p.dtcmBytes, 32 -> p.nRob, 36 -> p.nXRes,
         40 -> p.nMemq, 44 -> p.nIssue, 48 -> 1)) read(a, v)
