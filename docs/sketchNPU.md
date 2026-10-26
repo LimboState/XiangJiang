@@ -1,5 +1,12 @@
 # XiangJiang NPU Architecture Draft
 
+> Implementation update: the current platform includes scalar, vector, matrix and DMA.
+> [DMA_ISA.md](DMA_ISA.md) defines the implemented DMA encoding, AXI master, alignment,
+> range prechecks, faults and status registers, superseding the DMA open items below.
+> Appendix B records the original scalar baseline; historical test counts and scalar-only
+> descriptions are not a statement of the current feature set. HALT is the exact word
+> `0x0000000B` as defined in Scalar_ISA.md, not the obsolete zero-word draft encoding.
+
 ## 1. Architecture Overview
 
 The XiangJiang neural processing unit (NPU) uses a single instruction stream, a single 32-bit program counter (PC), a unified front end, and an in-order commit controller.
@@ -239,6 +246,11 @@ DTCM contains four independent banks for weights, activations, and intermediate 
 The scalar domain, vector domain, three matrix units, and DMA access DTCM through the interconnect. Software should distribute concurrently accessed input, output, and staging buffers across banks. Peak port bandwidth does not imply equivalent task-level concurrency under the policy in §5.
 
 ### 3.3. Direct Memory Access (DMA)
+
+The baseline implementation is specified in [DMA_ISA.md](DMA_ISA.md). It has separate
+inbound/outbound command queues and 64-byte data buffers with a shared serial scheduler
+and address/burst state. The DDR master is 32-bit and has one outstanding burst; commands
+require 4-byte alignment and support both contiguous and unsigned-stride 2D transfers.
 
 DMA uses a single AXI4 master interface and separate `Mvin` (external memory → DTCM) and `Mvout` (DTCM → external memory) engines. The hardware provides independent datapaths for the two directions, but the current scheduler does not activate commands in both directions concurrently.
 
@@ -516,9 +528,12 @@ conda activate XJ
 
 The `.exe` filename is upstream's cross-platform JVM launcher, not a Windows-only binary. Scala/Chisel configuration follows the [official Chisel installation guidance](https://www.chisel-lang.org/docs/installation).
 
-## Appendix B. Implemented Scalar-Only Platform
+## Appendix B. Original Scalar-Only Platform Baseline
 
-`src/main/scala/top/XiangJiangNPU.scala` implements the scalar configuration. It contains no vector, matrix, DMA, cache, branch predictor, privilege architecture, or external-memory master. [Scalar_ISA.md](Scalar_ISA.md) fixes the 33 supported instructions and their encodings; this is an RV32I subset plus a custom zero-word HALT, not a complete RV32I platform.
+This appendix describes the original scalar configuration. The current
+`src/main/scala/top/XiangJiangNPU.scala` also includes vector, matrix, and DMA, including
+an external-memory AXI master; see README.md and DMA_ISA.md. It still has no cache,
+branch predictor or privilege architecture. [Scalar_ISA.md](Scalar_ISA.md) fixes the 33 supported instructions and their encodings; this is an RV32I subset plus a custom zero-word HALT, not a complete RV32I platform.
 
 ### B.1. Module Organization and Execution
 

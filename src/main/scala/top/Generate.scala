@@ -32,7 +32,13 @@ object Generate extends App {
   "sequenceBits": ${p.seqBits},
   "axiAddressBits": 32,
   "axiDataBits": 32,
-  "axiIdBits": ${p.axiIdBits}
+  "axiIdBits": ${p.axiIdBits},
+  "dmaAddressBits": 32,
+  "dmaDataBits": 32,
+  "dmaLocalBits": 512,
+  "dmaMaxBurstBeats": ${p.dmaMaxBurstBeats},
+  "dmaOutstandingBursts": 1,
+  "dmaAlignmentBytes": 4
 }
 """
   java.nio.file.Files.writeString(target.resolve("xiangjiang-config.json"), configuration)

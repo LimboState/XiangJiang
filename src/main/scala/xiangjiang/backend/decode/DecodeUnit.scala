@@ -198,12 +198,20 @@ class DecodeUnit(p: XJParams) extends Module {
       vecOp === VecOp.vslidedownImm.U
   }
 
+  // DMA uses the otherwise reserved custom-1 funct3=3 space. Config
+  // instructions are barriers but run through MemQ to capture scalar operands.
+  when(opcode === "h2b".U && funct3 === 3.U && inst(11, 7) === 0.U && funct7 >= 16.U && funct7 <= 19.U) {
+    decode(UOpCode.DMA, FuType.mem, true, true, false, 0.U, false)
+    io.out.dmaOp := funct7(1, 0)
+  }
+
   io.out.exception := io.in.exception || !legal
   io.out.cause := Mux(io.in.exception, io.in.cause,
     Mux(!legal, FaultCode.illegal, FaultCode.none))
   io.out.badAddr := Mux(io.in.exception, io.in.badAddr, Mux(!legal, inst, 0.U))
   io.out.writesRd := destination && io.out.rd =/= 0.U && !io.out.exception
-  io.out.barrier := io.out.fu === FuType.bru || io.out.fu === FuType.system || io.out.exception
+  io.out.barrier := io.out.fu === FuType.bru || io.out.fu === FuType.system || io.out.exception ||
+    (io.out.op === UOpCode.DMA && !io.out.dmaOp(1))
   when(io.out.exception) {
     io.out.usesRs1 := false.B
     io.out.usesRs2 := false.B

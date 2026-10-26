@@ -2,7 +2,7 @@ package top
 
 import chisel3._
 import chisel3.util._
-import device.{Axi4Slave, AxiLiteSlave, ControlRegisters, MemorySubsystem}
+import device.{Axi4Slave, AxiLiteSlave, ControlRegisters, DmaEngine, MemorySubsystem}
 import xiangjiang._
 
 /** XiangJiang scalar/vector NPU with separate host control and memory AXI slaves. */
@@ -10,6 +10,8 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   val io = IO(new Bundle {
     val control = new AxiLiteSlave
     val memory = new Axi4Slave(p.axiIdBits)
+    val ddr = Flipped(new Axi4Slave(p.axiIdBits))
+    val dmaStatus = Output(new DmaCompletion)
     val status = Output(new CoreStatus)
     val retire = Output(Valid(new CommitRecord(p)))
     val debugRegs = Output(Vec(32, UInt(32.W)))
@@ -19,6 +21,15 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   val core = Module(new ScalarCore(p))
   val tcm = Module(new MemorySubsystem(p))
   val control = Module(new ControlRegisters(p))
+  val dma = Module(new DmaEngine(p))
+  io.ddr <> dma.io.axi
+  dma.io.command <> core.io.dmaCommand
+  core.io.dmaCompletion <> dma.io.completion
+  core.io.dmaBusy := dma.io.busy
+  tcm.io.dmaReq <> dma.io.memReq
+  dma.io.memResp <> tcm.io.dmaResp
+  io.dmaStatus := dma.io.status
+  control.io.dmaStatus := dma.io.status
   io.control <> control.io.axi
   io.memory <> tcm.io.axi
   control.io.status := core.io.status

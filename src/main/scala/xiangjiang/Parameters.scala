@@ -11,7 +11,8 @@ case class XJParams(
   seqBits: Int = 16,
   bankBytes: Int = 4096,
   axiIdBits: Int = 4,
-  nVRes: Int = 4
+  nVRes: Int = 4,
+  dmaMaxBurstBeats: Int = 16
 ) {
   require(nRob >= 1)
   require(nIssue >= 1 && nXRes >= 1 && nVRes >= 1 && nMemq >= 1)
@@ -19,6 +20,7 @@ case class XJParams(
   require(bankBytes >= 64 && bankBytes % 64 == 0)
   require(BigInt(bankBytes) * 4 <= BigInt("10000000", 16))
   require(axiIdBits >= 1)
+  require(dmaMaxBurstBeats >= 1 && dmaMaxBurstBeats <= 256)
   val robBits = log2Ceil(nRob)
   val itcmBytes = 512 * 1024
   val dtcmBytes = bankBytes * 4

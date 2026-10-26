@@ -22,6 +22,8 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
   }
   private class MemoryDriver(val dut: MemorySubsystem) {
     dut.io.coreBusy.poke(false.B)
+    dut.io.matrixReq.valid.poke(false); dut.io.matrixResp.ready.poke(false)
+    dut.io.dmaReq.valid.poke(false); dut.io.dmaResp.ready.poke(false)
     dut.io.axi.aw.valid.poke(false.B); dut.io.axi.w.valid.poke(false.B)
     dut.io.axi.ar.valid.poke(false.B); dut.io.axi.b.ready.poke(false.B)
     dut.io.axi.r.ready.poke(false.B)
@@ -91,6 +93,48 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         dut.clock.step()
       }
       dut.io.dataResp.ready.poke(true.B); dut.clock.step(); dut.io.dataResp.ready.poke(false.B)
+    }
+  }
+
+  test("DMA wide adapter arbitrates collisions, retains response ownership and preserves byte masks") {
+    simulate(new MemorySubsystem(p)) { d =>
+      val m = new MemoryDriver(d)
+      for (i <- 0 until 16) m.write(base + i * 4, 0x12345678)
+      d.io.coreBusy.poke(true)
+      d.io.dataReq.valid.poke(true); d.io.dataReq.bits.addr.poke(64)
+      d.io.dataReq.bits.write.poke(true); d.io.dataReq.bits.data.poke(99)
+      for (req <- Seq(d.io.matrixReq, d.io.dmaReq)) {
+        req.valid.poke(true); req.bits.addr.poke(0); req.bits.write.poke(true)
+        req.bits.data.poke(BigInt("ff" * 64, 16)); req.bits.mask.poke(15)
+      }
+      d.io.dmaReq.bits.mask.poke(BigInt(15) << 4)
+      d.io.dataReq.ready.expect(true)
+      d.io.matrixReq.ready.expect(false); d.io.dmaReq.ready.expect(false)
+      d.clock.step(); d.io.dataReq.valid.poke(false)
+      d.io.matrixReq.ready.expect(true); d.io.dmaReq.ready.expect(false)
+      d.clock.step(); d.io.matrixReq.valid.poke(false)
+      until(d, d.io.matrixResp.valid.peek().litToBoolean)
+      d.io.matrixResp.bits.error.expect(false); d.io.dmaResp.valid.expect(false)
+      d.clock.step(4); d.io.dmaReq.ready.expect(false)
+      d.io.matrixResp.ready.poke(true); d.clock.step(); d.io.matrixResp.ready.poke(false)
+      d.io.dmaReq.ready.expect(true); d.clock.step(); d.io.dmaReq.valid.poke(false)
+      until(d, d.io.dmaResp.valid.peek().litToBoolean)
+      d.io.dmaResp.bits.error.expect(false); d.io.matrixResp.valid.expect(false)
+      d.clock.step(4); d.io.dmaResp.valid.expect(true)
+      d.io.dmaResp.ready.poke(true); d.clock.step(); d.io.dmaResp.ready.poke(false)
+      d.io.dataResp.ready.poke(true); d.clock.step(); d.io.dataResp.ready.poke(false)
+      d.io.coreBusy.poke(false)
+      m.read(base, BigInt("ffffffff", 16)); m.read(base + 4, BigInt("ffffffff", 16))
+      m.read(base + 8, 0x12345678); m.read(base + 64, 99)
+      for (bad <- Seq(1, p.dtcmBytes)) {
+        d.io.dmaReq.bits.addr.poke(bad); d.io.dmaReq.valid.poke(true)
+        until(d, d.io.dmaReq.ready.peek().litToBoolean)
+        d.clock.step(); d.io.dmaReq.valid.poke(false)
+        until(d, d.io.dmaResp.valid.peek().litToBoolean)
+        d.io.dmaResp.bits.error.expect(true)
+        d.io.dmaResp.ready.poke(true); d.clock.step(); d.io.dmaResp.ready.poke(false)
+      }
+      m.read(base + 8, 0x12345678)
     }
   }
 
@@ -320,6 +364,8 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
       dut.io.axi.ar.valid.poke(false.B); dut.io.axi.ar.bits.addr.poke(0.U); dut.io.axi.ar.bits.prot.poke(0.U)
       dut.io.axi.b.ready.poke(false.B); dut.io.axi.r.ready.poke(false.B)
       dut.io.hostIdle.poke(true.B)
+      dut.io.dmaStatus.cause.poke(13); dut.io.dmaStatus.partial.poke(true)
+      dut.io.dmaStatus.address.poke(0x1234); dut.io.dmaStatus.bytesCompleted.poke(BigInt("123456789", 16))
       dut.io.status.busy.poke(false.B); dut.io.status.done.poke(false.B); dut.io.status.fault.poke(false.B)
       dut.io.status.faultPc.poke(20.U); dut.io.status.faultInst.poke(21.U)
       dut.io.status.faultCause.poke(7.U); dut.io.status.faultAddr.poke(23.U)
@@ -379,7 +425,8 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         24 -> p.itcmBytes, 28 -> p.dtcmBytes, 32 -> p.nRob, 36 -> p.nXRes,
         40 -> p.nMemq, 44 -> p.nIssue, 48 -> 1)) read(a, v)
       for (i <- 0 until 32) read(0x100 + i * 4, if (i == 0) 0 else 100 + i)
-      for (a <- Seq(1, 0x34, 0xfc, 0x180)) read(a, 0, error = true)
+      read(0x34, 29); read(0x38, 0x1234); read(0x3c, BigInt("23456789", 16)); read(0x40, 1)
+      for (a <- Seq(1, 0x44, 0xfc, 0x180)) read(a, 0, error = true)
       for (a <- Seq(1, 4, 0x100, 0x180)) write(a, 1, error = true)
     }
   }

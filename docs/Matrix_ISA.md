@@ -1,6 +1,6 @@
 # XiangJiang Matrix ISA
 
-本文定义固定 `16×16` 矩阵单元的指令。Scalar ISA、Vector ISA 以及统一的 ROB/MemQ 提交规则保持不变。
+本文定义固定 `16×16` 矩阵单元的指令。Scalar ISA、Vector ISA 以及统一的 ROB/MemQ 规则保持不变。
 
 ## 1. 硬件与数据约定
 
@@ -66,7 +66,9 @@ Scalar ISA 已使用完整机器字 `0x0000000B` 作为 `HALT`，矩阵不使用
 └───────────┴────────┴────────┴──────┴───────────┴─────────┘
 ```
 
-`unit=000/001/010` 分别选择 `u0/u1/u2`，`unit=011` 保留。
+`unit=000/001/010` 分别选择 `u0/u1/u2`；`unit=011` 不选择矩阵单元。
+该 funct3 下的 funct7=0x10–0x13 已分配给 [DMA_ISA.md](DMA_ISA.md)，其他编码仍保留。
+例如 `MSETMODE unit=3` 仍非法，不会解释为 DMA。
 
 | 指令 | `funct7` | `funct3` | 寄存器字段 |
 | --- | --- | --- | --- |

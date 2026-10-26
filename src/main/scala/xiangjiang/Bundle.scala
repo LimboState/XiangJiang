@@ -7,7 +7,7 @@ object UOpCode extends ChiselEnum {
   val ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU,
       ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU,
       LUI, AUIPC, LW, SW, BEQ, BNE, BLT, BGE, BLTU, BGEU,
-      JAL, JALR, FENCE, HALT, VECTOR, MATRIX = Value
+      JAL, JALR, FENCE, HALT, VECTOR, MATRIX, DMA = Value
 }
 
 object FuType extends ChiselEnum {
@@ -37,6 +37,10 @@ object FaultCode {
   val matrixLoadAccess = 9.U(4.W)
   val matrixStoreAlign = 10.U(4.W)
   val matrixStoreAccess = 11.U(4.W)
+  val dmaConfig = 12.U(4.W)
+  val dmaRead = 13.U(4.W)
+  val dmaWrite = 14.U(4.W)
+  val dmaProtocol = 15.U(4.W)
 }
 
 /** Implementation-defined vector operation identifiers.
@@ -134,6 +138,7 @@ class MicroOp(p: XJParams) extends Bundle {
   val matBuffer = UInt(2.W)
   val matMode = Bool()
   val matId = UInt(5.W)
+  val dmaOp = UInt(2.W)
   val barrier = Bool()
   val exception = Bool()
   val cause = UInt(4.W)
@@ -191,8 +196,9 @@ class FetchPacket extends Bundle {
   val badAddr = UInt(32.W)
 }
 
-/** One 64-byte matrix DTCM beat.  Addresses are 64-byte aligned and the
-  * full beat must lie inside DTCM; write beats always cover all 64 bytes.
+/** Shared 64-byte matrix/DMA DTCM beat. Addresses are 64-byte aligned and
+  * the full physical row must lie inside DTCM. Matrix writes cover all bytes;
+  * DMA uses the byte mask to preserve bytes outside the current burst.
   */
 class MatrixBeatReq extends Bundle {
   val addr = UInt(32.W)
@@ -203,6 +209,27 @@ class MatrixBeatReq extends Bundle {
 
 class MatrixBeatResp extends Bundle {
   val data = UInt(512.W)
+  val error = Bool()
+}
+
+/** DMA fields are unsigned byte counts/addresses; strides are row-start deltas. */
+class DmaShape extends Bundle {
+  val rowBytes = UInt(32.W)
+  val rows = UInt(32.W)
+  val externalStride = UInt(32.W)
+  val localStride = UInt(32.W)
+}
+class DmaCommand extends Bundle {
+  val write = Bool() // true: DTCM -> DDR
+  val external = UInt(32.W)
+  val local = UInt(32.W)
+  val shape = new DmaShape
+}
+class DmaCompletion extends Bundle {
+  val cause = UInt(4.W)
+  val address = UInt(32.W)
+  val bytesCompleted = UInt(64.W)
+  val partial = Bool()
 }
 
 /** Parameters for one ordered matrix task handed from LSU to MatrixUnit. */

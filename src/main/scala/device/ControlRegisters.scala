@@ -10,6 +10,7 @@ class ControlRegisters(p: XJParams) extends Module {
     val axi = new AxiLiteSlave
     val status = Input(new CoreStatus)
     val hostIdle = Input(Bool())
+    val dmaStatus = Input(new DmaCompletion)
     val start = Output(Bool())
     val ack = Output(Bool())
     val debugRegs = Input(Vec(32, UInt(32.W)))
@@ -69,8 +70,12 @@ class ControlRegisters(p: XJParams) extends Module {
     is("h28".U) { readData := p.nMemq.U }
     is("h2c".U) { readData := p.nIssue.U }
     is("h30".U) { readData := 1.U }
+    is("h34".U) { readData := Cat(io.dmaStatus.partial, io.dmaStatus.cause) }
+    is("h38".U) { readData := io.dmaStatus.address }
+    is("h3c".U) { readData := io.dmaStatus.bytesCompleted(31, 0) }
+    is("h40".U) { readData := io.dmaStatus.bytesCompleted(63, 32) }
   }
-  known := address <= "h30".U || (address >= "h100".U && address <= "h17c".U)
+  known := address <= "h40".U || (address >= "h100".U && address <= "h17c".U)
   when(address >= "h100".U && address <= "h17c".U) {
     readData := io.debugRegs(address(6, 2))
   }

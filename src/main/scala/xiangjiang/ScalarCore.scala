@@ -21,6 +21,9 @@ class ScalarCore(p: XJParams) extends Module {
     val dataResp = Flipped(Decoupled(new WordResp))
     val matrixReq = Decoupled(new MatrixBeatReq)
     val matrixResp = Flipped(Decoupled(new MatrixBeatResp))
+    val dmaCommand = Decoupled(new DmaCommand)
+    val dmaCompletion = Flipped(Decoupled(new DmaCompletion))
+    val dmaBusy = Input(Bool())
     val status = Output(new CoreStatus)
     val debugRegs = Output(Vec(32, UInt(32.W)))
     val debugVRegs = Output(Vec(32, UInt(512.W)))
@@ -140,6 +143,9 @@ class ScalarCore(p: XJParams) extends Module {
   lsu.io.response <> io.dataResp
   lsu.io.matrixTask <> matrix.io.task
   lsu.io.matrixDone := matrix.io.done
+  io.dmaCommand <> lsu.io.dmaCommand
+  lsu.io.dmaCompletion <> io.dmaCompletion
+  lsu.io.dmaBusy := io.dmaBusy
   io.matrixReq <> matrix.io.memReq
   matrix.io.memResp <> io.matrixResp
 
