@@ -120,7 +120,61 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
 
       for (i <- 0 until 16) {
         val row = get32s(512L + i * 64L, 16)
-        assert(row == c(i).toSeq, s"INT8 row $i mismatch: $row != ${c(i).toSeq}")
+        assert(row == c(i).toSeq, s"INT8 u1 row $i mismatch: $row != ${c(i).toSeq}")
+      }
+
+      // u2 is an independent physical INT8 systolic array with the same
+      // architectural operation and storage format.
+      runTask(MatOp.mload, 2, 0, 0)
+      runTask(MatOp.mload, 2, 1, 256)
+      runTask(MatOp.mmul, 2)
+      runTask(MatOp.mwait, 2)
+      runTask(MatOp.mstore, 2, 0, 3072)
+      for (i <- 0 until 16) {
+        val row = get32s(3072L + i * 64L, 16)
+        assert(row == c(i).toSeq, s"INT8 u2 row $i mismatch: $row != ${c(i).toSeq}")
+      }
+
+      // BF16 MMUL and MMACC use FP32 PE accumulators and narrow only at
+      // MSTORE.  Diagonal matrices make the expected RNE result exact.
+      val bfA = Array.tabulate(16, 16) { (i, j) => if (i == j) 0x3f80 else 0 }
+      val bfB = Array.tabulate(16, 16) { (i, j) => if (i == j) 0x4000 else 0 }
+      for (beat <- 0 until 8) {
+        val values = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => bfA(r)(col))
+        }
+        put16(0L + beat * 64L, values)
+      }
+      for (beat <- 0 until 8) {
+        val values = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => bfB(r)(col))
+        }
+        put16(512L + beat * 64L, values)
+      }
+      runTask(MatOp.mload, 0, 0, 0)
+      runTask(MatOp.mload, 0, 1, 512)
+      runTask(MatOp.mmul, 0)
+      runTask(MatOp.mwait, 0)
+      runTask(MatOp.mstore, 0, 0, 1024)
+      for (beat <- 0 until 8) {
+        val data = get64(1024L + beat * 64L)
+        val got = (0 until 32).map(i => ((data >> (16 * i)) & 0xffff).toInt)
+        val expected = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => if (r == col) 0x4000 else 0)
+        }
+        assert(got == expected, s"BF16 MMUL beat $beat mismatch: $got != $expected")
+      }
+      runTask(MatOp.mload, 0, 2, 1024)
+      runTask(MatOp.mmacc, 0)
+      runTask(MatOp.mwait, 0)
+      runTask(MatOp.mstore, 0, 0, 1536)
+      for (beat <- 0 until 8) {
+        val data = get64(1536L + beat * 64L)
+        val got = (0 until 32).map(i => ((data >> (16 * i)) & 0xffff).toInt)
+        val expected = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => if (r == col) 0x4080 else 0)
+        }
+        assert(got == expected, s"BF16 MMACC beat $beat mismatch: $got != $expected")
       }
 
       // BF16 transpose: exact small integers survive widen/narrow round-trips.

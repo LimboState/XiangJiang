@@ -4,12 +4,67 @@ import chisel3._
 import chisel3.util._
 import xiangjiang._
 
-/** One 16x16 matrix array with plain register-based input buffers and an
-  * internal accumulator.  The staircase/skewed datapath of the architecture is
-  * folded into the load/compute handshake: MLOAD always writes a complete
-  * 16x16 tile before the array can start a compute task, and the per-element
-  * systolic reduction below produces the same architectural result.
+/** One output-stationary processing element.  A moves east, B moves
+  * south, and this PE retains one FP32/INT32 output.  During a matrix product
+  * it accepts at most one pair and performs exactly one multiply-accumulate
+  * per cycle.  The valid bits, rather than the payload registers, delimit a
+  * wavefront and make back-to-back matrix products independent.
   */
+class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
+  val io = IO(new Bundle {
+    val aIn = Input(UInt(elementBits.W))
+    val bIn = Input(UInt(elementBits.W))
+    val aInValid = Input(Bool())
+    val bInValid = Input(Bool())
+    val advance = Input(Bool())
+    val clearPipe = Input(Bool())
+    val clearAcc = Input(Bool())
+    val loadAccValid = Input(Bool())
+    val loadAccData = Input(UInt(32.W))
+    val aOut = Output(UInt(elementBits.W))
+    val bOut = Output(UInt(elementBits.W))
+    val aOutValid = Output(Bool())
+    val bOutValid = Output(Bool())
+    val acc = Output(UInt(32.W))
+  })
+
+  val a = Reg(UInt(elementBits.W))
+  val b = Reg(UInt(elementBits.W))
+  val aValid = RegInit(false.B)
+  val bValid = RegInit(false.B)
+  val accumulator = Reg(UInt(32.W))
+
+  io.aOut := a
+  io.bOut := b
+  io.aOutValid := aValid
+  io.bOutValid := bValid
+  io.acc := accumulator
+
+  when(io.clearPipe) {
+    aValid := false.B
+    bValid := false.B
+  }.elsewhen(io.advance) {
+    a := io.aIn
+    b := io.bIn
+    aValid := io.aInValid
+    bValid := io.bInValid
+  }
+
+  when(io.loadAccValid) {
+    accumulator := io.loadAccData
+  }.elsewhen(io.clearAcc) {
+    accumulator := 0.U
+  }.elsewhen(io.advance && io.aInValid && io.bInValid) {
+    if (bf16) {
+      val product = VectorFloat.mul32(VectorFloat.widen(io.aIn), VectorFloat.widen(io.bIn))
+      accumulator := VectorFloat.add32(accumulator, product)
+    } else {
+      val product = (io.aIn.asSInt * io.bIn.asSInt).pad(32)
+      accumulator := (accumulator.asSInt + product).asUInt
+    }
+  }
+}
+
 class MatrixArrayIO extends Bundle {
   val loadBeat = Input(Valid(new Bundle {
     val buffer = UInt(2.W)
@@ -23,132 +78,163 @@ class MatrixArrayIO extends Bundle {
   val flush = Input(Bool())
 }
 
+/** A physical 16x16 output-stationary systolic array.
+  *
+  * Row i receives A(i,k) at cycle i+k and column j receives B(k,j) at cycle
+  * j+k.  Registered east/south links align equal k values at PE(i,j) in cycle
+  * i+j+k.  Consequently a 16x16 product takes 3*16-2 = 46 wavefront cycles;
+  * all 256 PEs work concurrently and each PE performs one MAC per active cycle.
+  */
 class MatrixArray(bf16: Boolean) extends Module {
   val io = IO(new MatrixArrayIO)
-  private val idle :: computing :: complete :: Nil = Enum(3)
+  private val elementBits = if (bf16) 16 else 8
+  private val idle :: prepare :: computing :: elementwise :: complete :: Nil = Enum(5)
   private val state = RegInit(idle)
   private val op = Reg(MatOp())
-  private val phase = Reg(UInt(8.W))
+  private val phase = RegInit(0.U(8.W))
+  private val aBuf = Reg(Vec(256, UInt(elementBits.W)))
+  private val bBuf = Reg(Vec(256, UInt(elementBits.W)))
+  private val pes = Seq.tabulate(16, 16) { (_, _) =>
+    Module(new SystolicPE(elementBits, bf16))
+  }
+  private val peAcc = VecInit(pes.flatten.map(_.io.acc))
 
-  if (bf16) {
-    val aBuf = Reg(Vec(256, UInt(16.W)))
-    val bBuf = Reg(Vec(256, UInt(16.W)))
-    val acc = Reg(Vec(256, UInt(32.W)))
+  io.start.ready := state === idle && !io.flush
+  io.busy := state =/= idle
 
-    when(io.loadBeat.valid) {
-      val beat = io.loadBeat.bits.beat
-      val data = io.loadBeat.bits.data
-      when(io.loadBeat.bits.buffer === 0.U) {
-        aBuf := VecInit((0 until 256).map { e =>
-          val local = e % 32
-          Mux((e >> 5).U === beat, data(16 * local + 15, 16 * local), aBuf(e))
-        })
-      }.elsewhen(io.loadBeat.bits.buffer === 1.U) {
-        bBuf := VecInit((0 until 256).map { e =>
-          val local = e % 32
-          Mux((e >> 5).U === beat, data(16 * local + 15, 16 * local), bBuf(e))
-        })
-      }.otherwise {
-        acc := VecInit((0 until 256).map { e =>
-          val local = e % 32
-          Mux((e >> 5).U === beat,
-            VectorFloat.widen(data(16 * local + 15, 16 * local)), acc(e))
-        })
+  for (pe <- pes.flatten) {
+    pe.io.advance := state === computing
+    pe.io.clearPipe := io.flush || state === prepare
+    pe.io.clearAcc := state === prepare && op === MatOp.mmul
+    pe.io.loadAccValid := false.B
+    pe.io.loadAccData := 0.U
+  }
+
+  // Complete-tile MLOADs populate the edge injection buffers.  ACC loads are
+  // distributed directly to the output-stationary accumulator in each PE.
+  when(io.loadBeat.valid) {
+    val beat = io.loadBeat.bits.beat
+    val data = io.loadBeat.bits.data
+    if (bf16) {
+      for (e <- 0 until 256) {
+        val local = e % 32
+        when((e >> 5).U === beat) {
+          when(io.loadBeat.bits.buffer === 0.U) {
+            aBuf(e) := data(16 * local + 15, 16 * local)
+          }.elsewhen(io.loadBeat.bits.buffer === 1.U) {
+            bBuf(e) := data(16 * local + 15, 16 * local)
+          }.otherwise {
+            pes(e / 16)(e % 16).io.loadAccValid := true.B
+            pes(e / 16)(e % 16).io.loadAccData :=
+              VectorFloat.widen(data(16 * local + 15, 16 * local))
+          }
+        }
+      }
+    } else {
+      for (e <- 0 until 256) {
+        val local = e % 64
+        when((e >> 6).U === beat) {
+          when(io.loadBeat.bits.buffer === 0.U) {
+            aBuf(e) := data(8 * local + 7, 8 * local)
+          }.elsewhen(io.loadBeat.bits.buffer === 1.U) {
+            bBuf(e) := data(8 * local + 7, 8 * local)
+          }
+        }
+        when(io.loadBeat.bits.buffer === 2.U && (e >> 4).U === beat) {
+          val accLocal = e % 16
+          pes(e / 16)(e % 16).io.loadAccValid := true.B
+          pes(e / 16)(e % 16).io.loadAccData :=
+            data(32 * accLocal + 31, 32 * accLocal)
+        }
       }
     }
+  }
 
-    io.storeData := VecInit((0 until 32).map { local =>
-      val e = Cat(io.storeBeat(2, 0), local.U(5.W))
-      VectorFloat.narrow(acc(e))
-    }).asUInt
+  // Skewed edge injection and registered nearest-neighbour links.
+  for (i <- 0 until 16; j <- 0 until 16) {
+    val pe = pes(i)(j)
+    if (j == 0) {
+      val k = (phase - i.U)(3, 0)
+      pe.io.aIn := aBuf(Cat(i.U(4.W), k))
+      pe.io.aInValid := state === computing && phase >= i.U && phase < (i + 16).U
+    } else {
+      pe.io.aIn := pes(i)(j - 1).io.aOut
+      pe.io.aInValid := pes(i)(j - 1).io.aOutValid
+    }
+    if (i == 0) {
+      val k = (phase - j.U)(3, 0)
+      pe.io.bIn := bBuf(Cat(k, j.U(4.W)))
+      pe.io.bInValid := state === computing && phase >= j.U && phase < (j + 16).U
+    } else {
+      pe.io.bIn := pes(i - 1)(j).io.bOut
+      pe.io.bInValid := pes(i - 1)(j).io.bOutValid
+    }
+  }
 
-    io.start.ready := state === idle && !io.flush
-    io.busy := state =/= idle
-    when(io.flush) {
-      state := idle
-    }.otherwise {
-      when(io.start.fire) {
-        op := io.start.bits.op
-        phase := 0.U
-        state := computing
-      }
-      when(state === computing) {
-        val i = phase(7, 4)
-        val j = phase(3, 0)
-        val terms = (0 until 16).map { k =>
-          VectorFloat.mul32(VectorFloat.widen(aBuf(Cat(i, k.U(4.W)))),
-            VectorFloat.widen(bBuf(Cat(k.U(4.W), j))))
-        }
-        val dot = terms.reduce((x, y) => VectorFloat.add32(x, y))
-        val result = WireDefault(dot)
-        when(op === MatOp.mmacc) { result := VectorFloat.add32(acc(phase), dot) }
-        when(op === MatOp.mew) {
-          result := VectorFloat.mul32(VectorFloat.widen(aBuf(phase)),
-            VectorFloat.widen(bBuf(phase)))
-        }
-        when(op === MatOp.mtrans) { result := VectorFloat.widen(aBuf(Cat(j, i))) }
-        acc(phase) := result
-        when(phase === 255.U) { state := complete }.otherwise { phase := phase + 1.U }
-      }
-      when(state === complete) { state := idle }
+  // Elementwise and transpose operations do not need a matrix wavefront.  A
+  // shared lane writes one PE accumulator per cycle while MMUL/MMACC always use
+  // the physical systolic datapath above.
+  val elementResult = WireDefault(0.U(32.W))
+  if (bf16) {
+    elementResult := VectorFloat.widen(aBuf(Cat(phase(3, 0), phase(7, 4))))
+    when(op === MatOp.mew) {
+      elementResult := VectorFloat.mul32(VectorFloat.widen(aBuf(phase)),
+        VectorFloat.widen(bBuf(phase)))
     }
   } else {
-    val aBuf = Reg(Vec(256, UInt(8.W)))
-    val bBuf = Reg(Vec(256, UInt(8.W)))
-    val acc = Reg(Vec(256, UInt(32.W)))
-
-    when(io.loadBeat.valid) {
-      val beat = io.loadBeat.bits.beat
-      val data = io.loadBeat.bits.data
-      when(io.loadBeat.bits.buffer === 0.U) {
-        aBuf := VecInit((0 until 256).map { e =>
-          val local = e % 64
-          Mux((e >> 6).U === beat, data(8 * local + 7, 8 * local), aBuf(e))
-        })
-      }.elsewhen(io.loadBeat.bits.buffer === 1.U) {
-        bBuf := VecInit((0 until 256).map { e =>
-          val local = e % 64
-          Mux((e >> 6).U === beat, data(8 * local + 7, 8 * local), bBuf(e))
-        })
-      }.otherwise {
-        acc := VecInit((0 until 256).map { e =>
-          val local = e % 16
-          Mux((e >> 4).U === beat, data(32 * local + 31, 32 * local), acc(e))
-        })
-      }
+    elementResult := aBuf(Cat(phase(3, 0), phase(7, 4))).asSInt.pad(32).asUInt
+    when(op === MatOp.mew) {
+      elementResult := (aBuf(phase).asSInt * bBuf(phase).asSInt).pad(32).asUInt
     }
+  }
+  for ((pe, e) <- pes.flatten.zipWithIndex) {
+    when(state === elementwise && phase === e.U) {
+      pe.io.loadAccValid := true.B
+      pe.io.loadAccData := elementResult
+    }
+  }
 
-    io.storeData := VecInit((0 until 16).map { local =>
-      acc(Cat(io.storeBeat(3, 0), local.U(4.W)))
+  if (bf16) {
+    io.storeData := VecInit((0 until 32).map { local =>
+      val e = Cat(io.storeBeat(2, 0), local.U(5.W))
+      VectorFloat.narrow(peAcc(e))
     }).asUInt
+  } else {
+    io.storeData := VecInit((0 until 16).map { local =>
+      peAcc(Cat(io.storeBeat(3, 0), local.U(4.W)))
+    }).asUInt
+  }
 
-    io.start.ready := state === idle && !io.flush
-    io.busy := state =/= idle
-    when(io.flush) {
-      state := idle
-    }.otherwise {
-      when(io.start.fire) {
-        op := io.start.bits.op
-        phase := 0.U
-        state := computing
-      }
-      when(state === computing) {
-        val i = phase(7, 4)
-        val j = phase(3, 0)
-        val dot = (0 until 16).foldLeft(0.S(32.W)) { case (sum, k) =>
-          sum + (aBuf(Cat(i, k.U(4.W))).asSInt * bBuf(Cat(k.U(4.W), j)).asSInt)
-        }
-        val result = WireDefault(dot.asUInt)
-        when(op === MatOp.mmacc) { result := (acc(phase).asSInt + dot).asUInt }
-        when(op === MatOp.mew) {
-          result := (aBuf(phase).asSInt * bBuf(phase).asSInt).pad(32).asUInt
-        }
-        when(op === MatOp.mtrans) { result := aBuf(Cat(j, i)).asSInt.pad(32).asUInt }
-        acc(phase) := result
-        when(phase === 255.U) { state := complete }.otherwise { phase := phase + 1.U }
-      }
-      when(state === complete) { state := idle }
+  when(io.flush) {
+    state := idle
+    phase := 0.U
+  }.otherwise {
+    when(io.start.fire) {
+      op := io.start.bits.op
+      phase := 0.U
+      state := Mux(io.start.bits.op === MatOp.mmul || io.start.bits.op === MatOp.mmacc,
+        prepare, elementwise)
     }
+    when(state === prepare) {
+      phase := 0.U
+      state := computing
+    }
+    when(state === computing) {
+      // Last useful pair reaches PE(15,15) at cycle 15+15+15 = 45.
+      when(phase === 45.U) {
+        state := complete
+      }.otherwise {
+        phase := phase + 1.U
+      }
+    }
+    when(state === elementwise) {
+      when(phase === 255.U) {
+        state := complete
+      }.otherwise {
+        phase := phase + 1.U
+      }
+    }
+    when(state === complete) { state := idle }
   }
 }
 
