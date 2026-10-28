@@ -32,3 +32,15 @@ extension defined by `docs/DMA_ISA.md`.
 
 `top.Generate` emits split SystemVerilog, verification layers, `filelist.f`,
 and `xiangjiang-config.json` under the selected output directory.
+
+For Vivado IP packaging (ZCU102 by default):
+
+```bash
+./mill xj.runMain top.Elaborate generated/vivado 100000000
+vivado -mode batch -source generated/vivado/package_ip.tcl
+```
+
+`top.Elaborate` additionally emits the `XiangJiangAXI` wrapper with Xilinx AXI
+metadata, active-low reset, compact host address apertures, a synthesis manifest,
+and an IP packaging script. See [Vivado IP integration](docs/Vivado_IP.md) for
+address mapping, clock/reset wiring, and DDR/cache requirements.
