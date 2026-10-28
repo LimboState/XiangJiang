@@ -6,7 +6,7 @@
 
 | 阵列 | 数据类型 | 数据流 | 累加与输出 |
 | --- | --- | --- | --- |
-| `u0` | BF16 | 固定 OS | BF16×BF16，FP32 累加；结果 RNE 转为 BF16 |
+| `u0` | BF16 | 固定 OS | MMUL/MMACC 的 BF16×BF16 乘积先 RNE 为 BF16，再精确扩展为 FP32 累加；结果 RNE 转为 BF16 |
 | `u1` | INT8 | OS/WS | 有符号 INT8×INT8，乘积扩展为 INT32；输出 INT32 |
 | `u2` | INT8 | OS/WS | 有符号 INT8×INT8，乘积扩展为 INT32；输出 INT32 |
 
@@ -14,6 +14,22 @@
 - 每个 unit 有 A/B 输入 skew buffer 和内部累加器。A、B 从 DTCM 通过 `MLOAD` 装入，结果通过 `MSTORE` 写回 DTCM。
 - tile 为行主序、紧密排列，不携带 stride。输入/输出地址由标量 `x` 寄存器提供。
 - 矩阵任务按序进入 MemQ；只有 MemQ 队首且 ROB 队首授权后，load、compute 或 store 才能启动。当前策略最多一个 MemQ 项 active。
+
+### BF16 PE 数值语义与流水线
+
+`MMUL/MMACC` 的每次 PE 更新为：
+
+```text
+productBF16 = RNE_BF16(A * B)
+ACC = RNE_FP32(ACC + widen_FP32(productBF16))
+```
+
+乘积的 BF16 舍入、溢出和渐进下溢发生在累加之前；这不是 FP32 乘积累加，也不是融合 FMA。
+PE 第一个时钟沿将乘积写入 16-bit 寄存器，第二个时钟沿将 FP32 加法结果写入 ACC。
+流水线每拍可接收一对 A/B（II=1），不将吞吐率降低为每两拍一对。
+16×16 阵列保留原来的 46 拍 A/B 波前传播，BF16 额外用一拍排空最后的乘积；
+prepare/complete 控制状态另计。flush、清 ACC 和装载 ACC 会取消尚未累加的乘积。
+INT8 PE 仍是单拍 MAC。`MEW` 的共享单 lane 乘法路径和 `MTRANS` 不受此 PE 流水化修改影响。
 
 ## 2. 指令一览
 

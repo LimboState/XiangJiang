@@ -7,8 +7,9 @@ import xiangjiang._
 /** One output-stationary processing element.  A moves east, B moves
   * south, and this PE retains one FP32/INT32 output.  During a matrix product
   * it accepts at most one pair and performs exactly one multiply-accumulate
-  * per cycle.  The valid bits, rather than the payload registers, delimit a
-  * wavefront and make back-to-back matrix products independent.
+  * per cycle. BF16 MACs have two stages: an RNE BF16 product register, then
+  * exact widening and FP32 accumulation. INT8 MACs remain single-cycle.
+  * Valid bits delimit the wavefront and make back-to-back products independent.
   */
 class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
   val io = IO(new Bundle {
@@ -50,15 +51,29 @@ class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
     bValid := io.bInValid
   }
 
-  when(io.loadAccValid) {
-    accumulator := io.loadAccData
-  }.elsewhen(io.clearAcc) {
-    accumulator := 0.U
-  }.elsewhen(io.advance && io.aInValid && io.bInValid) {
-    if (bf16) {
-      val product = VectorFloat.mul32(VectorFloat.widen(io.aIn), VectorFloat.widen(io.bIn))
-      accumulator := VectorFloat.add32(accumulator, product)
-    } else {
+  if (bf16) {
+    val product = Reg(UInt(16.W))
+    val productValid = RegInit(false.B)
+    val cancel = io.clearPipe || io.clearAcc || io.loadAccValid
+    val accept = io.advance && io.aInValid && io.bInValid && !cancel
+    // Advance gates input acceptance, not retirement: the last product must
+    // drain even after A/B propagation stops. Bubbles must never replay a MAC.
+    productValid := accept
+    when(accept) { product := VectorFloat.mul(io.aIn, io.bIn) }
+
+    when(io.loadAccValid) {
+      accumulator := io.loadAccData
+    }.elsewhen(io.clearAcc) {
+      accumulator := 0.U
+    }.elsewhen(productValid && !io.clearPipe && !reset.asBool) {
+      accumulator := VectorFloat.add32(accumulator, VectorFloat.widen(product))
+    }
+  } else {
+    when(io.loadAccValid) {
+      accumulator := io.loadAccData
+    }.elsewhen(io.clearAcc) {
+      accumulator := 0.U
+    }.elsewhen(io.advance && io.aInValid && io.bInValid) {
       val product = (io.aIn.asSInt * io.bIn.asSInt).pad(32)
       accumulator := (accumulator.asSInt + product).asUInt
     }
@@ -83,7 +98,8 @@ class MatrixArrayIO extends Bundle {
   * Row i receives A(i,k) at cycle i+k and column j receives B(k,j) at cycle
   * j+k.  Registered east/south links align equal k values at PE(i,j) in cycle
   * i+j+k.  Consequently a 16x16 product takes 3*16-2 = 46 wavefront cycles;
-  * all 256 PEs work concurrently and each PE performs one MAC per active cycle.
+  * all 256 PEs work concurrently and each PE accepts one MAC per active cycle.
+  * BF16 adds one drain cycle for the registered product (47 compute cycles).
   */
 class MatrixArray(bf16: Boolean) extends Module {
   val io = IO(new MatrixArrayIO)
@@ -220,8 +236,9 @@ class MatrixArray(bf16: Boolean) extends Module {
       state := computing
     }
     when(state === computing) {
-      // Last useful pair reaches PE(15,15) at cycle 15+15+15 = 45.
-      when(phase === 45.U) {
+      // Last pair reaches PE(15,15) at phase 45. BF16 retires that
+      // registered product at phase 46 before reporting completion.
+      when(phase === (if (bf16) 46 else 45).U) {
         state := complete
       }.otherwise {
         phase := phase + 1.U

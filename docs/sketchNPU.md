@@ -197,7 +197,7 @@ The three independent matrix units each contain a 16×16 systolic array with 256
 
 | Unit | Dataflow | Multiplication, accumulation, and output |
 | --- | --- | --- |
-| One BF16 unit | Output-stationary (OS) | BF16×BF16→FP32 multiplication and FP32+FP32→FP32 accumulation; partial sums remain in their corresponding PEs across K-dimension tiles within a task; convert to BF16 with RNE only after the entire K dimension is complete |
+| One BF16 unit | Output-stationary (OS) | MMUL/MMACC use BF16×BF16→BF16 multiplication (RNE), register the BF16 product, then widen exactly for FP32+FP32→FP32 accumulation in the next cycle; partial sums remain FP32 in their PEs; MSTORE converts the accumulated result to BF16 with RNE |
 | Two INT8 units | Each unit selects either OS or weight-stationary (WS), with only one mode active at a time | Signed 8×8-bit multiplication produces a full INT16 product, which is sign-extended to INT32 before accumulation; output INT32 directly without narrowing |
 
 Each INT8 unit uses register control and data routing to reuse the same multipliers and adders across modes. OS retains INT32 partial sums in the PEs. WS retains INT8 weights in the PEs and forwards and accumulates INT32 partial sums along the reduction path.

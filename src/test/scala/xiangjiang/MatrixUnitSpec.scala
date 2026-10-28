@@ -135,8 +135,8 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
         assert(row == c(i).toSeq, s"INT8 u2 row $i mismatch: $row != ${c(i).toSeq}")
       }
 
-      // BF16 MMUL and MMACC use FP32 PE accumulators and narrow only at
-      // MSTORE.  Diagonal matrices make the expected RNE result exact.
+      // BF16 MMUL/MMACC round products to BF16, then accumulate in FP32.
+      // Diagonal matrices also exercise the final PE's product drain.
       val bfA = Array.tabulate(16, 16) { (i, j) => if (i == j) 0x3f80 else 0 }
       val bfB = Array.tabulate(16, 16) { (i, j) => if (i == j) 0x4000 else 0 }
       for (beat <- 0 until 8) {
@@ -175,6 +175,40 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
           (0 until 16).map(col => if (r == col) 0x4080 else 0)
         }
         assert(got == expected, s"BF16 MMACC beat $beat mismatch: $got != $expected")
+      }
+
+      // Non-exact products: BF16(0x3f81)^2 rounds to BF16(0x3f82).
+      // Preload -0x3f82 on the diagonal so the new MMACC returns exact zero;
+      // the old FP32 multiplication would leave 2^-14 instead. Exercise all
+      // diagonal PEs, including the last product in PE(15,15).
+      for (beat <- 0 until 8) {
+        val input = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => if (r == col) 0x3f81 else 0)
+        }
+        val initial = (beat * 2 until beat * 2 + 2).flatMap { r =>
+          (0 until 16).map(col => if (r == col) 0xbf82 else 0)
+        }
+        put16(beat * 64L, input)
+        put16(512L + beat * 64L, input)
+        put16(1024L + beat * 64L, initial)
+      }
+      runTask(MatOp.mload, 0, 0, 0)
+      runTask(MatOp.mload, 0, 1, 512)
+      runTask(MatOp.mload, 0, 2, 1024)
+      runTask(MatOp.mmacc, 0)
+      runTask(MatOp.mstore, 0, 0, 1536)
+      for (beat <- 0 until 8) assert(get64(1536L + beat * 64L) == 0)
+      // Consecutive compute tasks preserve MAC order and clear only on MMUL.
+      runTask(MatOp.mmul, 0)
+      runTask(MatOp.mmacc, 0)
+      runTask(MatOp.mstore, 0, 0, 1536)
+      for (beat <- 0 until 8) {
+        val data = get64(1536L + beat * 64L)
+        for (i <- 0 until 32) {
+          val e = beat * 32 + i
+          val expected = if (e / 16 == e % 16) 0x4002 else 0
+          assert(((data >> (16 * i)) & 0xffff) == expected)
+        }
       }
 
       // BF16 transpose: exact small integers survive widen/narrow round-trips.
