@@ -91,9 +91,7 @@ Table 3-12 时钟（页 44）。这是一份资源规划，不是综合利用率
 3. DTCM 16 KiB 比较 LUTRAM/BRAM；需要扩容时优先评估总计 128 KiB 的 BRAM 档位。
 4. 对 PE 内乘法定向尝试 DSP，避免浪费 DSP 于大量简单指数加减。
 5. 检查 BF16 FP32 累加、MEW 动态 mux 和 MSTORE narrow；不能只关注乘法器。
-6. VectorUnit 每拍处理一个 lane，但除法、exp、rsqrt 内部仍是组合硬件。
-   若成为关键路径，需要迭代/流水化并修改完成握手，不能仅添加时序例外。
-7. 初期目标 50–100 MHz，必须以实现后的 WNS/TNS 为准。不要用 multicycle/false path
+6. 初期目标 50–100 MHz，必须以实现后的 WNS/TNS 为准。不要用 multicycle/false path
    掩盖每拍实际更新的 MAC 反馈；要同时验证 hold 和未约束路径。
 
 ## 板级资源选择

@@ -174,9 +174,13 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
       run(Seq(instruction(63, 7, 0, 0), instruction(60, 7, 2, 0), halt),
         1, 0, instruction(63, 7, 0, 0).toLong)
       assert(requests.isEmpty); dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(92))))
-      for (bad <- Seq(instruction(58, 7, 9, 5), instruction(56, 7, 0, 0))) {
+
+      val illegalUnary = for (selector <- 6 to 31; mask <- Seq(None, Some(4)))
+        yield instruction(58, 7, selector, 5, mask)
+      for (bad <- illegalUnary :+ instruction(56, 7, 0, 0)) {
         run(Seq(bad, instruction(60, 7, 2, 0), halt), 1, 0, bad.toLong)
         assert(requests.isEmpty)
+        dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(92))))
       }
       // A runtime write error retains earlier acknowledged lanes, but blocks all younger stores.
       val secondWord = get32(132)

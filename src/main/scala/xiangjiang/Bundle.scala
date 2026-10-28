@@ -50,7 +50,7 @@ object FaultCode {
   * and the remaining bit is inst[25].  For the paired arithmetic, logical,
   * comparison and floating-point operations an even identifier is the
   * vector-vector form and an odd identifier is the vector-scalar form.
-  * Permutation, conversion, reduction, special-function and memory identifiers
+  * Permutation, conversion, reduction and memory identifiers
   * are standalone.
   */
 object VecOp {
@@ -102,9 +102,6 @@ object VecOp {
   val uFloatToInt = 3
   val uFredSum = 4
   val uFredMax = 5
-  val uExp = 6
-  val uRcp = 7
-  val uRsqrt = 8
 }
 
 class RobTag(p: XJParams) extends Bundle {

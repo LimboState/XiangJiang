@@ -211,6 +211,29 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
         }
       }
 
+      // Dense BF16 matrices exercise all k terms and every spatial PE, not
+      // just diagonal multiplication. Small integer operands/sums are exact.
+      val denseA = Array.tabulate(16, 16)((i, k) => (i + 2 * k) % 5 - 2)
+      val denseB = Array.tabulate(16, 16)((k, j) => (3 * k + j) % 5 - 2)
+      def bf16(x: Int): Int = java.lang.Float.floatToRawIntBits(x.toFloat) >>> 16
+      for (beat <- 0 until 8) {
+        val indices = beat * 32 until (beat + 1) * 32
+        put16(beat * 64L, indices.map(e => bf16(denseA(e / 16)(e % 16))))
+        put16(512L + beat * 64L, indices.map(e => bf16(denseB(e / 16)(e % 16))))
+      }
+      runTask(MatOp.mload, 0, 0, 0)
+      runTask(MatOp.mload, 0, 1, 512)
+      for (pass <- 1 to 2) {
+        runTask(if (pass == 1) MatOp.mmul else MatOp.mmacc, 0)
+        runTask(MatOp.mstore, 0, 0, 1536)
+        for (beat <- 0 until 8; lane <- 0 until 32) {
+          val e = beat * 32 + lane
+          val sum = (0 until 16).map(k => denseA(e / 16)(k) * denseB(k)(e % 16)).sum
+          val got = ((get64(1536L + beat * 64L) >> (16 * lane)) & 0xffff).toInt
+          assert(got == bf16(pass * sum), s"dense BF16 pass=$pass PE=${e / 16},${e % 16}")
+        }
+      }
+
       // BF16 transpose: exact small integers survive widen/narrow round-trips.
       val t = Array.tabulate(16, 16) { (i, j) => i * 16 + j }
       for (beat <- 0 until 8) {

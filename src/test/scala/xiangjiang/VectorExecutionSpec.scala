@@ -187,16 +187,6 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
       execute(58, one, bb, BigInt(0), selector = 4, mask = 0)
       execute(58, two, bb, BigInt(0x4000), selector = 5)
       execute(58, two, bb, BigInt(0xff80), selector = 5, mask = 0)
-      // Custom special functions: BF16 exp, reciprocal and reciprocal square root.
-      val four = Seq.fill(16)(BigInt(0x4080))
-      execute(58, one, bb, merged(Seq.fill(16)(BigInt(0x402e))), selector = VecOp.uExp)
-      execute(58, four, bb, merged(Seq.fill(16)(BigInt(0x425a))), selector = VecOp.uExp)
-      execute(58, Seq.fill(16)(BigInt(0)), bb,
-        merged(Seq.fill(16)(BigInt(0x3f80))), selector = VecOp.uExp)
-      execute(58, two, bb, merged(Seq.fill(16)(BigInt(0x3f00))), selector = VecOp.uRcp)
-      execute(58, four, bb, merged(Seq.fill(16)(BigInt(0x3f00))), selector = VecOp.uRsqrt)
-      execute(58, Seq.fill(16)(BigInt(0x3f80)), bb,
-        pack(Seq.fill(16)(BigInt(0x3f80))), selector = VecOp.uRsqrt, unmasked = true)
       // Ascending FP32 accumulation retains a unit lost by BF16 accumulation.
       val cancellation = Seq[BigInt](0x4380, 0x3f80, 0xc380) ++ Seq.fill(13)(BigInt(0))
       execute(58, cancellation, bb, BigInt(0x3f800000), selector = 4, unmasked = true)

@@ -76,9 +76,6 @@ class VectorUnit(p: XJParams) extends Module {
         is(VecOp.uNarrow.U) { value := VectorFloat.narrow(a) }
         is(VecOp.uIntToFloat.U) { value := VectorFloat.fromInt(a) }
         is(VecOp.uFloatToInt.U) { value := VectorFloat.toInt(a) }
-        is(VecOp.uExp.U) { value := VectorFloat.exp(a(15, 0)) }
-        is(VecOp.uRcp.U) { value := VectorFloat.rcp(a(15, 0)) }
-        is(VecOp.uRsqrt.U) { value := VectorFloat.rsqrt(a(15, 0)) }
       }
     }
   }

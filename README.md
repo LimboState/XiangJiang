@@ -10,8 +10,8 @@ extension defined by `docs/DMA_ISA.md`.
 - Scalar: RV32I integer subset, `LW`/`SW`, `FENCE`, and the exact custom-0
   `HALT` word `0x0000000B`.
 - Vector: 32 x 512-bit registers, 16 INT32/BF16 lanes, masked arithmetic,
-  BF16 fused multiply-add and conversions, permutation, comparison, reduction,
-  and `Vexp`/`Vrcp`/`Vrsqrt`.
+  BF16 fused multiply-add and conversions, permutation, comparison, and reduction.
+  `Vexp`/`Vrcp`/`Vrsqrt` are not implemented.
 - Matrix: one BF16 and two INT8 16x16 arrays, `MSETMODE`/`MLOAD`/`MSTORE`
   tile movement, `MMUL`/`MMACC`/`MEW`/`MTRANS`, and `MWAIT`/`MBARRIER`/
   `MFENCE` synchronization.

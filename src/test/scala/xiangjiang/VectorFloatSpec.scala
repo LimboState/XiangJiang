@@ -29,9 +29,6 @@ class VectorFloatHarness extends Module {
     val fromInt = Output(UInt(32.W))
     val toInt = Output(UInt(32.W))
     val add32 = Output(UInt(32.W))
-    val exp = Output(UInt(16.W))
-    val rcp = Output(UInt(16.W))
-    val rsqrt = Output(UInt(16.W))
   })
   io.add := VectorFloat.add(io.a, io.b)
   io.sub := VectorFloat.sub(io.a, io.b)
@@ -48,9 +45,6 @@ class VectorFloatHarness extends Module {
   io.fromInt := VectorFloat.fromInt(io.integer)
   io.toInt := VectorFloat.toInt(io.x)
   io.add32 := VectorFloat.add32(io.x, io.y)
-  io.exp := VectorFloat.exp(io.a)
-  io.rcp := VectorFloat.rcp(io.a)
-  io.rsqrt := VectorFloat.rsqrt(io.a)
 }
 
 /** Exact rational oracle: no host floating arithmetic, intermediate rounding,
@@ -233,28 +227,4 @@ class VectorFloatSpec extends AnyFunSuite with ChiselSim {
     }
   }
 
-  test("special functions handle exact values and IEEE special operands") {
-    simulate(new VectorFloatHarness) { dut =>
-      def check(a: BigInt, exp: BigInt, rcp: BigInt, rsqrt: BigInt): Unit = {
-        dut.io.a.poke(a)
-        withClue(s"a=${a.toString(16)}: ") {
-          dut.io.exp.expect(exp)
-          dut.io.rcp.expect(rcp)
-          dut.io.rsqrt.expect(rsqrt)
-        }
-      }
-      val inf = BigInt(0x7f80)
-      val ninf = BigInt(0xff80)
-      val qnan = BigInt(0x7fc0)
-      check(0x0000, 0x3f80, inf, inf)
-      check(0x8000, 0x3f80, ninf, ninf)
-      check(0x3f80, 0x402e, 0x3f80, 0x3f80) // exp(1) ~= e, 1/1, 1/sqrt(1)
-      check(0xbf80, 0x3ebc, 0xbf80, qnan) // exp(-1), -1, sqrt(-1)
-      check(0x4000, 0x40ec, 0x3f00, 0x3f35) // exp(2), 1/2, 1/sqrt(2)
-      check(0x4080, 0x425a, 0x3e80, 0x3f00) // exp(4), 1/4, 1/sqrt(4)
-      check(inf, inf, 0x0000, 0x0000)
-      check(ninf, 0x0000, 0x8000, qnan)
-      check(qnan, qnan, qnan, qnan)
-    }
-  }
 }

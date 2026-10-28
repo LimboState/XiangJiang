@@ -174,7 +174,7 @@ class DecodeUnit(p: XJParams) extends Module {
   val vectorMemory = vecOp >= VecOp.vle32.U && vecOp <= VecOp.vse16.U
   val vectorStore = vecOp === VecOp.vse32.U || vecOp === VecOp.vse16.U
   val merge = vecOp === VecOp.vmerge.U
-  val unaryLegal = selector <= VecOp.uRsqrt.U
+  val unaryLegal = selector <= VecOp.uFredMax.U // 6..31 reserved, including removed special functions
   when(customOpcode && !matrixDomain && vecOp =/= 63.U && (!unary || unaryLegal) && (!merge || !inst(26))) {
     legal := true.B
     io.out.op := UOpCode.VECTOR

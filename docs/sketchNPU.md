@@ -181,7 +181,7 @@ Comparisons write their Boolean results to the corresponding bits of the destina
 | `vmfeq`, `vmflt`, `vmfle` | `.vv / .vx` | BF16 equality/less-than/less-than-or-equal |
 | `vmerge.vvm` | Two vectors and a mask | Select one of the two source vectors independently for each lane according to the mask |
 
-#### Special-Function Extensions*
+#### Special-Function Extensions（No）
 
 | Custom instruction | Per-lane operation | Standard RVV comparison, for reference only |
 | --- | --- | --- |
@@ -189,7 +189,6 @@ Comparisons write their Boolean results to the corresponding bits of the destina
 | `Vrcp` | `1/x` | `vfrec7.v` provides a reciprocal estimate with approximately seven significant binary bits of precision |
 | `Vrsqrt` | `1/sqrt(x)` | `vfrsqrt7.v` provides a reciprocal square-root estimate with approximately seven significant binary bits of precision |
 
-The capitalization of these custom instruction names is preserved. At a selected element width (SEW) of 32 bits, the standard estimate instructions consume and produce FP32 values, but do not provide full FP32 computational precision. Their behavior does not define the custom instructions' types, error bounds, or special-value handling.
 
 ### 2.3. Matrix Execution Domain
 

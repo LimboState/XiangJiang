@@ -122,7 +122,6 @@ object VectorFloat {
   }
 
   def div(a: UInt, b: UInt): UInt = divGeneric(a(15, 0), b(15, 0), 8)
-  def div32(a: UInt, b: UInt): UInt = divGeneric(a(31, 0), b(31, 0), 24)
 
   def fma(a: UInt, b: UInt, c: UInt): UInt = {
     val x = new Parts(a, 8)
@@ -172,86 +171,6 @@ object VectorFloat {
 
   def min(a: UInt, b: UInt): UInt = minMax(a, b, maximum = false)
   def max(a: UInt, b: UInt): UInt = minMax(a, b, maximum = true)
-
-  /** Combinational digit-by-digit integer square root. */
-  private def integerSqrt(n: UInt): UInt = {
-    val width = n.getWidth
-    val pairs = (width + 1) / 2
-    val rootWidth = pairs + 1
-    var remainder: UInt = 0.U((width + 2).W)
-    var root: UInt = 0.U(rootWidth.W)
-    for (i <- (pairs - 1) to 0 by -1) {
-      val lo = 2 * i
-      val bits: UInt =
-        if (lo + 1 < width) n(lo + 1, lo)
-        else if (lo < width) Cat(0.U(1.W), n(lo))
-        else 0.U(2.W)
-      val shifted = Cat(remainder, bits)
-      val rootShifted = (root << 1)(rootWidth - 1, 0)
-      val trial = (rootShifted + 1.U).pad(width + 4)
-      val ge = shifted >= trial
-      remainder = Mux(ge, shifted - trial, shifted)(width + 1, 0)
-      root = Mux(ge, rootShifted + 2.U, rootShifted)(rootWidth - 1, 0)
-    }
-    (root >> 1)(pairs - 1, 0)
-  }
-
-  /** FP32 square root with one final RNE rounding to FP32. */
-  def sqrt32(a: UInt): UInt = {
-    val x = new Parts(a(31, 0), 24)
-    val q = x.exponent - 23.S(12.W)
-    val oddExponent = q(0)
-    val nPrime = Mux(oddExponent, Cat(x.normalized, 0.U(1.W)),
-      Cat(0.U(1.W), x.normalized))
-    val radicand = Cat(nPrime, 0.U(20.W))
-    val root = integerSqrt(radicand)
-    val sticky = (root * root) =/= radicand
-    // root*2^20 approximates sqrt(nPrime); the low four guard bits widen the
-    // magnitude enough for round() and fold the remainder into bit zero.
-    val magnitude = Cat(root, 0.U(4.W)) | sticky.asUInt
-    val finite = round(magnitude, (q >> 1) - 14.S(12.W), false.B, 24)
-    Mux(x.isNaN, nan(24),
-      Mux(x.isInf, Mux(x.sign, nan(24), infinity(false.B, 24)),
-        Mux(x.isZero, zero(x.sign, 24), Mux(x.sign, nan(24), finite))))
-  }
-
-  def rsqrt32(a: UInt): UInt = div32("h3f800000".U(32.W), sqrt32(a))
-
-  private def fp32(x: Float): UInt =
-    BigInt(java.lang.Float.floatToRawIntBits(x) & 0xffffffffL).U(32.W)
-
-  /** exp(x) for FP32, using range reduction and a fifth-order polynomial. */
-  def exp32(a: UInt): UInt = {
-    val x = new Parts(a(31, 0), 24)
-    val log2e = fp32(1.4426950408889634f)
-    val ln2 = fp32(-0.6931471805599453f)
-    val kBits = toInt(mul32(a(31, 0), log2e))
-    val k = kBits.asSInt
-    val kf = fromInt(kBits)
-    val r = add32(a(31, 0), mul32(kf, ln2))
-    var acc = fp32(1.0f / 720.0f)
-    acc = add32(mul32(acc, r), fp32(1.0f / 120.0f))
-    acc = add32(mul32(acc, r), fp32(1.0f / 24.0f))
-    acc = add32(mul32(acc, r), fp32(1.0f / 6.0f))
-    acc = add32(mul32(acc, r), fp32(0.5f))
-    acc = add32(mul32(acc, r), fp32(1.0f))
-    acc = add32(mul32(acc, r), fp32(1.0f))
-    def pow2(exponent: SInt): UInt =
-      Cat(0.U(1.W), (127.S(10.W) + exponent)(7, 0), 0.U(23.W))
-    val scale = Mux(k < (-126).S,
-      mul32(fp32(1.17549435e-38f), pow2(k + 126.S)),
-      pow2(k))
-    val finite = mul32(acc, scale)
-    Mux(x.isNaN, nan(24),
-      Mux(x.isInf, Mux(x.sign, zero(false.B, 24), infinity(false.B, 24)),
-        Mux(x.isZero, fp32(1.0f),
-          Mux(k > 127.S, infinity(false.B, 24),
-            Mux(k < (-149).S, zero(false.B, 24), finite)))))
-  }
-
-  def exp(a: UInt): UInt = narrow(exp32(widen(a(15, 0))))
-  def rcp(a: UInt): UInt = div("h3f80".U(16.W), a(15, 0))
-  def rsqrt(a: UInt): UInt = narrow(rsqrt32(widen(a(15, 0))))
 
   def widen(a: UInt): UInt = {
     val x = new Parts(a, 8)
