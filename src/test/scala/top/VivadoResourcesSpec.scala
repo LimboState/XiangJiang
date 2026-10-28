@@ -29,7 +29,7 @@ endmodule
   test("default policy annotates only SRAM declarations and targeted PE arithmetic") {
     val result = VivadoResources(sources, VivadoResources.Policy())
     assert(result.sources("itcm.sv").contains("(* ram_style = \"block\" *) reg"))
-    assert(result.sources("dtcm.sv").contains("(* ram_style = \"distributed\" *) reg"))
+    assert(result.sources("dtcm.sv").contains("(* ram_style = \"block\" *) reg"))
     assert(result.sources("bf16.sv").contains("(* use_dsp = \"yes\" *) automatic logic [15:0] product_product"))
     assert(!result.sources("bf16.sv").contains("*) reg [31:0] accumulator"))
     assert(result.sources("int8.sv").contains("(* use_dsp = \"yes\" *) reg [31:0] accumulator"))
@@ -41,9 +41,10 @@ endmodule
     assert(result.report.contains("bf16.sv"))
   }
 
-  test("BRAM and LUT-arithmetic comparison policy is explicit and reproducible") {
-    val result = VivadoResources(sources, VivadoResources.Policy("block", "no"))
-    assert(result.sources("dtcm.sv").contains("ram_style = \"block\""))
+  test("LUTRAM and LUT-arithmetic comparison policy is explicit and reproducible") {
+    val result = VivadoResources(sources, VivadoResources.Policy("distributed", "no"))
+    assert(result.sources("itcm.sv").contains("ram_style = \"block\""))
+    assert(result.sources("dtcm.sv").contains("ram_style = \"distributed\""))
     assert(result.sources("bf16.sv").contains("use_dsp = \"no\""))
     assert(result.sources("int8.sv").contains("use_dsp = \"no\""))
     intercept[IllegalArgumentException] { VivadoResources.Policy("auto", "yes") }

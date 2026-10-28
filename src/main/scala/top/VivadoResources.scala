@@ -2,7 +2,7 @@ package top
 
 /** Checked, export-only attributes. Never modify the simulation RTL or timing. */
 private[top] object VivadoResources {
-  case class Policy(dtcmRam: String = "distributed", peDsp: String = "yes") {
+  case class Policy(dtcmRam: String = "block", peDsp: String = "yes") {
     require(Set("block", "distributed")(dtcmRam), "dtcmRam must be block or distributed")
     require(Set("yes", "no")(peDsp), "peDsp must be yes or no")
   }

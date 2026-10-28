@@ -22,8 +22,8 @@ Table 3-12 时钟（页 44）。这是一份资源规划，不是综合利用率
 | 模块 | 当前规模 | 推荐资源 | 说明 |
 | --- | --- | --- | --- |
 | ITCM | 512 KiB，131072×32，字节写使能 | BRAM | 不允许默默退化为大量 FF/LUT |
-| DTCM | 4×4 KiB，每 bank 64×512，1R1W | 先比较 LUTRAM / BRAM 两版 | 保持同步读一拍、64-bit byte mask |
-| BF16 PE product | 256×8×8 有效数乘法，16-bit BF16 product 寄存器 | DSP 优先试验，和 LUT 版比较 | 浮点指数/舍入仍需逻辑资源 |
+| DTCM | 4×4 KiB，每 bank 64×512，1R1W | 默认 BRAM | 保持同步读一拍、64-bit byte mask；LUTRAM 仅作对照 |
+| BF16 PE product | 256×8×8 有效数乘法，16-bit BF16 product 寄存器 | 默认引导使用 DSP | 浮点指数/舍入仍需逻辑资源 |
 | BF16 FP32 ACC | 256×32-bit | FF + LUT/Carry | 非原生 DSP48E2 浮点累加；仍需检查反馈路径 |
 | 两个 INT8 阵列 | 512 个 signed 8×8 + INT32 ACC | 优先推断 DSP48E2 MAC | 需核对复位/使能/加载优先级能否吸收进 DSP |
 | A/B tile buffers | 三阵列共 16,384 bit | FF 或分 bank LUTRAM | 多行/列并行取数，不能直接替换为单个双口 BRAM |
@@ -88,7 +88,7 @@ Table 3-12 时钟（页 44）。这是一份资源规划，不是综合利用率
 1. 保留当前 ISA、三个 16×16 阵列和两级 BF16 PE，先综合建立 baseline。
 2. 确保 ITCM 正确推断 BRAM。若失败，使用受版本管理的 FPGA RAM/XPM wrapper，
    保持一拍读延迟、字节使能和冲突语义，不永久手改生成文件。
-3. DTCM 16 KiB 比较 LUTRAM/BRAM；需要扩容时优先评估总计 128 KiB 的 BRAM 档位。
+3. DTCM 16 KiB 默认 BRAM，优先修复曾出现的 FF 退化；需要扩容时评估总计 128 KiB 的 BRAM 档位。
 4. 对 PE 内乘法定向尝试 DSP，避免浪费 DSP 于大量简单指数加减。
 5. 检查 BF16 FP32 累加、MEW 动态 mux 和 MSTORE narrow；不能只关注乘法器。
 6. 初期目标 50–100 MHz，必须以实现后的 WNS/TNS 为准。不要用 multicycle/false path
@@ -127,7 +127,7 @@ report_power -file power_impl.rpt
 
 按层级检查 `bf16Array`、两个 INT8 array、`VectorUnit`、`InstructionTcm`、`DataTcm`、
 AXI Interconnect。记录实际资源/Slack 后再调整预算；没有这些报告，不能宣布资源分配
-或 100 MHz 时序已经验证。Elaborate 现已按本规划添加定向综合属性：ITCM `block`，默认浅 DTCM `distributed`，
-PE 乘法与 INT8 accumulator `use_dsp=yes`；可用第三/第四参数选择 DTCM `block` 或 PE
+或 100 MHz 时序已经验证。Elaborate 现已按本规划添加定向综合属性：ITCM `block`，DTCM 默认 `block`，
+PE 乘法与 INT8 accumulator `use_dsp=yes`；可用第三/第四参数选择 DTCM `distributed` 或 PE
 `use_dsp=no` 做 A/B 比较。其余逻辑保持自动映射。每次导出附带 `resource-policy.txt`，
 这些属性仍需 Vivado 验证，不代表已经验证资源数量、BRAM 推断或频率。

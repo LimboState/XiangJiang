@@ -7,9 +7,10 @@ import xiangjiang.XJParams
 /** FPGA export: top.Elaborate [directory] [clockHz] [dtcmRam] [peDsp] */
 object Elaborate {
   def main(args: Array[String]): Unit = {
-    require(args.length <= 4, "Usage: top.Elaborate [directory=generated/vivado] [clockHz=100000000] [dtcmRam=distributed|block] [peDsp=yes|no]")
+    require(args.length <= 4, "Usage: top.Elaborate [directory=generated/vivado] [clockHz=100000000] [dtcmRam=block|distributed] [peDsp=yes|no]")
+    val defaults = VivadoResources.Policy()
     val policy = VivadoResources.Policy(
-      args.lift(2).getOrElse("distributed"), args.lift(3).getOrElse("yes"))
+      args.lift(2).getOrElse(defaults.dtcmRam), args.lift(3).getOrElse(defaults.peDsp))
     val target = Paths.get(args.headOption.getOrElse("generated/vivado")).toAbsolutePath.normalize()
     val frequency = args.lift(1).map(_.toLong).getOrElse(100000000L)
     require(frequency > 0 && frequency <= 1000000000L, "clockHz must be in 1..1000000000")

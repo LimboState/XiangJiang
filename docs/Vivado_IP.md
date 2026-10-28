@@ -35,7 +35,7 @@ Elaborate 在独立导出目录中对 manifest 内的 RTL 定向添加属性：
 | 对象 | 默认属性 |
 | --- | --- |
 | ITCM Memory 数组 | `ram_style="block"` |
-| 当前 4×4 KiB DTCM Memory 数组 | `ram_style="distributed"` |
+| 当前 4×4 KiB DTCM Memory 数组 | `ram_style="block"` |
 | BF16 PE 的 8×8 有效数乘法临时结果 | `use_dsp="yes"` |
 | INT8 PE 的乘法临时结果、accumulator | `use_dsp="yes"` |
 | BF16 FP32 accumulator、VectorUnit、tile buffers、控制逻辑 | 不添加属性，自动综合 |
@@ -43,10 +43,10 @@ Elaborate 在独立导出目录中对 manifest 内的 RTL 定向添加属性：
 可选第三、第四个位置参数用于 A/B 综合比较（前两个参数必须提供）：
 
 ```bash
-# 默认：ITCM BRAM、浅 DTCM LUTRAM、PE 乘法优先 DSP
-./mill xj.runMain top.Elaborate generated/vivado 100000000 distributed yes
-# DTCM 改用 BRAM
-./mill xj.runMain top.Elaborate generated/vivado-bram 100000000 block yes
+# 默认：ITCM BRAM、DTCM BRAM、PE 乘法优先 DSP
+./mill xj.runMain top.Elaborate generated/vivado 100000000 block yes
+# 对照实验：DTCM 改用 LUTRAM
+./mill xj.runMain top.Elaborate generated/vivado-lutram 100000000 distributed yes
 # PE 乘法/INT8 累加不使用 DSP（比较 LUT 与时序）
 ./mill xj.runMain top.Elaborate generated/vivado-lut 100000000 distributed no
 ```

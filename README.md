@@ -42,5 +42,7 @@ vivado -mode batch -source generated/vivado/package_ip.tcl
 
 `top.Elaborate` additionally emits the `XiangJiangAXI` wrapper with Xilinx AXI
 metadata, active-low reset, compact host address apertures, a synthesis manifest,
-and an IP packaging script. See [Vivado IP integration](docs/Vivado_IP.md) for
+and an IP packaging script. Its default resource policy requests BRAM for both
+ITCM and DTCM, and DSP for PE multipliers (plus INT8 accumulators); BF16 FP32
+accumulation remains automatically mapped logic. See [Vivado IP integration](docs/Vivado_IP.md) for
 address mapping, clock/reset wiring, and DDR/cache requirements.
