@@ -8,14 +8,14 @@ import xiangjiang.XJParams
 object Elaborate {
   def main(args: Array[String]): Unit = {
     require(args.length <= 4, "Usage: top.Elaborate [directory=generated/vivado] [clockHz=100000000] [dtcmRam=block|distributed] [peDsp=yes|no]")
-    val defaults = VivadoResources.Policy()
-    val policy = VivadoResources.Policy(
+    val defaults = ResourcePolicy()
+    val policy = ResourcePolicy(
       args.lift(2).getOrElse(defaults.dtcmRam), args.lift(3).getOrElse(defaults.peDsp))
     val target = Paths.get(args.headOption.getOrElse("generated/vivado")).toAbsolutePath.normalize()
     val frequency = args.lift(1).map(_.toLong).getOrElse(100000000L)
     require(frequency > 0 && frequency <= 1000000000L, "clockHz must be in 1..1000000000")
     val p = XJParams()
-    require(p.dtcmBytes <= 512 * 1024, "Compact FPGA aperture supports at most 512 KiB DTCM")
+    require(p.dtcmBytes <= 1024 * 1024, "FPGA aperture supports at most 1 MiB DTCM")
     val rtl = target.resolve("rtl")
     Files.createDirectories(rtl)
     Generate.main(Array(rtl.toString))
@@ -32,7 +32,7 @@ object Elaborate {
       }.toVector
     // Validate every transformation before writing any annotated source.
     val original = sources.map(name => name -> Files.readString(target.resolve(name))).toMap
-    val annotated = VivadoResources(original, policy)
+    val annotated = annotateResources(original, policy)
     annotated.sources.foreach { case (name, text) =>
       if (text != original(name)) write(target.resolve(name), text)
     }
@@ -45,6 +45,67 @@ object Elaborate {
   }
 
   private def write(path: Path, text: String): Unit = { Files.writeString(path, text); () }
+
+  private[top] case class ResourcePolicy(dtcmRam: String = "block", peDsp: String = "yes") {
+    require(Set("block", "distributed")(dtcmRam), "dtcmRam must be block or distributed")
+    require(Set("yes", "no")(peDsp), "peDsp must be yes or no")
+  }
+  private[top] case class ResourceResult(sources: Map[String, String], report: String)
+
+  /** Checked, export-only attributes. Never modify the simulation RTL or timing. */
+  private[top] def annotateResources(sources: Map[String, String], policy: ResourcePolicy): ResourceResult = {
+    val changes = scala.collection.mutable.ArrayBuffer.empty[String]
+    var output = sources
+    def select(module: String): String = {
+      val header = ("(?m)^module " + module + "\\(").r
+      val matches = sources.keys.filter(k => header.findFirstIn(sources(k)).nonEmpty).toVector
+      require(matches.size == 1, s"Vivado resource policy: expected one $module module, found ${matches.size}")
+      matches.head
+    }
+    def annotate(file: String, declaration: String, attribute: String): Unit = {
+      val text = output(file)
+      require(!text.contains(s"(* $attribute *) $declaration"), s"Already annotated: $file/$declaration")
+      val count = text.sliding(declaration.length).count(_ == declaration)
+      require(count == 1, s"Vivado resource policy: expected one '$declaration' in $file, found $count; review firtool output")
+      output = output.updated(file, text.replace(declaration, s"(* $attribute *) $declaration"))
+      changes += s"$file: $attribute -> $declaration"
+    }
+    // These signatures deliberately pin the current default SRAM geometry.
+    // Changing capacity/compiler output must update and test the policy too.
+    val itcm = select("memory_65536x32")
+    val dtcm = select("memory_4096x512")
+    annotate(itcm, "reg [31:0] Memory[0:65535];", "ram_style = \"block\"")
+    annotate(dtcm, "reg [511:0] Memory[0:4095];", s"ram_style = \"${policy.dtcmRam}\"")
+
+    val bf16 = select("SystolicPE")
+    val int8 = select("SystolicPE_64")
+    def multiplier(file: String, name: String): Unit = {
+      val declaration = s"automatic logic [15:0] $name ="
+      val statement = (java.util.regex.Pattern.quote(declaration) + "[^;]*;").r
+        .findAllIn(output(file)).toVector
+      require(statement.size == 1 && statement.head.count(_ == '*') == 1,
+        s"Vivado resource policy: expected one 16-bit multiply assignment for $name in $file")
+      annotate(file, declaration, s"use_dsp = \"${policy.peDsp}\"")
+    }
+    multiplier(bf16, "product_product") // 8x8 significand only; NOT FP32 adder
+    multiplier(int8, "_product_T_2")
+    annotate(int8, "reg [31:0] accumulator;", s"use_dsp = \"${policy.peDsp}\"")
+
+    val report = s"""ZCU102 Vivado resource inference policy
+ITCM: 256 KiB -> block RAM (planning estimate: 64 RAMB36)
+DTCM: 4 x 256 KiB -> ${policy.dtcmRam} RAM
+PE significand/integer multipliers: use_dsp=${policy.peDsp}
+INT8 accumulator: use_dsp=${policy.peDsp} (permit MAC inference)
+BF16 FP32 accumulator, vector arithmetic, tile buffers and control: automatic
+No capacity, arithmetic, latency, clock constraint or ISA changes.
+Attributes guide synthesis; actual BRAM/DSP/LUT usage and timing require Vivado reports.
+Targets are checked against the emitted source manifest; unknown structures fail export.
+
+Applied declarations (shared module definitions cover every instance):
+${changes.mkString("\n")}
+"""
+    ResourceResult(output, report)
+  }
 
   private case class Signal(name: String, suffix: String, bits: Int, intoSlave: Boolean)
   private def signals(lite: Boolean, idBits: Int, addressBits: Int): Seq[Signal] = {

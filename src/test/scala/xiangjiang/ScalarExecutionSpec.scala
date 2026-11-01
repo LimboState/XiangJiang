@@ -136,11 +136,14 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         c.io.out.imm.expect(imm)
       }
       for (f7 <- 0 until 128; f3 <- 0 until 8) {
-        val legalR = f7 == 0 || (f7 == 32 && (f3 == 0 || f3 == 5))
+        val legalR = f7 == 0 || f7 == 1 ||
+          (f7 == 32 && (f3 == 0 || f3 == 5 || f3 == 4 || f3 == 6 || f3 == 7)) ||
+          (f7 == 5 && f3 >= 4) || (f7 == 48 && f3 == 5)
         c.io.in.inst.poke(r(f3, f7))
         c.io.out.exception.expect(!legalR)
         if (!legalR) { c.io.out.writesRd.expect(false); c.io.out.badAddr.expect(r(f3, f7)) }
-        val legalI = (f3 != 1 && f3 != 5) || f7 == 0 || (f3 == 5 && f7 == 32)
+        val legalI = (f3 != 1 && f3 != 5) || f3 == 1 && f7 == 0 ||
+          (f3 == 5 && (f7 == 0 || f7 == 32 || f7 == 48))
         c.io.in.inst.poke(i((f7 << 5) | 31, f3))
         c.io.out.exception.expect(!legalI)
       }
@@ -149,15 +152,17 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
           case 3 => f3 == 2
           case 0x23 => f3 == 2
           case 0x63 => f3 != 2 && f3 != 3
+          case 0x0f => f3 == 0 || f3 == 1
           case _ => f3 == 0
         }
         c.io.in.inst.poke(i(0, f3, opcode))
         c.io.out.exception.expect(!legal)
       }
-      // There is no privileged or environment-call subset: every SYSTEM word is illegal.
-      val systems = (0 until 4096).map(imm => i(imm, 0, 0x73, rd = 0, rs1 = 0)) ++
-        (for (imm <- Seq(0, 1); f3 <- 0 until 8; rd <- Seq(0, 1, 31); rs1 <- Seq(0, 1, 31))
-          yield i(imm, f3, 0x73, rd, rs1))
+      // Zicsr supports funct3 1..3 and 5..7; ECALL/EBREAK are exact host-event
+      // words.  SYSTEM words outside those encodings stay illegal.
+      val systems = (for (imm <- Seq(0, 1); f3 <- Seq(0, 4); rd <- Seq(0, 1, 31);
+        rs1 <- Seq(0, 1, 31)) yield i(imm, f3, 0x73, rd, rs1))
+        .filter(w => w != Rv32.ecall && w != Rv32.ebreak)
       for (inst <- systems) {
         c.io.in.inst.poke(inst)
         c.io.out.exception.expect(true)
@@ -172,8 +177,8 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         i(0, 0, 3, rd = 20, rs1 = 1), i(0, 1, 3, rd = 20, rs1 = 1),
         i(0, 4, 3, rd = 20, rs1 = 1), i(0, 5, 3, rd = 20, rs1 = 1),
         s(0, 0), s(0, 1), BigInt(0x200073),
-        BigInt(0xf3), BigInt(0x8073), BigInt(0x1000f3), BigInt(0x108073),
-        BigInt(0x1073), BigInt(0x100f), BigInt(0x53),
+        BigInt(0x4000f3), BigInt(0x80073), BigInt(0x1000f3), BigInt(0x1080f3),
+        BigInt(0x40073), BigInt(0x5053),
         Rv32.halt | 0x80, Rv32.halt | (BigInt(1) << 26), Rv32.halt | (BigInt(1) << 12), mask)
       for (inst <- illegal) {
         c.io.in.inst.poke(inst)
@@ -186,12 +191,12 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
       // An access failure wins over HALT and any illegal machine word.
       c.io.in.exception.poke(true)
       c.io.in.cause.poke(3)
-      c.io.in.badAddr.poke(0x80000)
+      c.io.in.badAddr.poke(0x40000)
       for (inst <- Seq(BigInt(0), Rv32.halt, mask, i(1))) {
         c.io.in.inst.poke(inst)
         c.io.out.exception.expect(true)
         c.io.out.cause.expect(3)
-        c.io.out.badAddr.expect(0x80000)
+        c.io.out.badAddr.expect(0x40000)
         c.io.out.writesRd.expect(false)
         c.io.out.usesRs1.expect(false)
         c.io.out.usesRs2.expect(false)
@@ -292,18 +297,18 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
       run(b(2), 1, 0, 0x100, 0x104) // Unselected misaligned target is harmless.
       run(b(-4096), 1, 0, 0x100, 0x104) // Unselected out-of-range target is harmless.
       run(b(2), 1, 1, 0x100, 0x102, 2)
-      run(b(8), 1, 1, 0x7fffc, 0x80004, 3)
-      run(b(-4), 1, 0, 0x7fffc, 0x80000, 3) // Not taken fallthrough is still checked.
+      run(b(8), 1, 1, 0x3fffc, 0x40004, 3)
+      run(b(-4), 1, 0, 0x3fffc, 0x40000, 3) // Not taken fallthrough is still checked.
       run(j(-4), 0, 0, 4, 0, link = 8)
-      run(j(4, rd = 0), 0, 0, 0x7fff8, 0x7fffc, link = 0x7fffc)
+      run(j(4, rd = 0), 0, 0, 0x3fff8, 0x3fffc, link = 0x3fffc)
       c.io.decoded.writesRd.expect(false)
       run(j(2), 0, 0, 0x100, 0x102, 2)
-      run(j(4), 0, 0, 0x7fffc, 0x80000, 3)
+      run(j(4), 0, 0, 0x3fffc, 0x40000, 3)
       run(j(-4), 0, 0, 0, mask - 3, 3)
       run(i(4, 0, 0x67, rd = 1, rs1 = 1), 0x200, 0, 0x100, 0x204, link = 0x104)
       run(i(0, 0, 0x67), 0x201, 0, 0x100, 0x200, link = 0x104)
       run(i(0, 0, 0x67), 0x203, 0, 0x100, 0x202, 2)
-      run(i(0, 0, 0x67), 0x80003, 0, 0x100, 0x80002, 2)
+      run(i(0, 0, 0x67), 0x40003, 0, 0x100, 0x40002, 2)
       run(i(1, 0, 0x67), mask, 0, 0x100, 0, link = 0x104)
       run(b(8, 0), 1, 0, 0x100, 0x104)
       run(b(8, 1), 1, 0, 0x100, 0x108)

@@ -4,7 +4,11 @@ import chisel3._
 import chisel3.util._
 import xiangjiang._
 
-/** In-order retirement with independent scalar and vector result pools. */
+/** In-order retirement with independent scalar, float and vector result pools.
+  * ROBTag = {slot, generation}; age uses the sequence field, never the slot.
+  * Each entry additionally carries candidate fflags and CSR update state that
+  * the commit controller publishes in program order.
+  */
 class Rob(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val allocate = Flipped(Decoupled(new MicroOp(p)))
@@ -16,6 +20,8 @@ class Rob(p: XJParams) extends Module {
     val wbAccepted = Output(Bool())
     val query = Input(Vec(2, new RobTag(p)))
     val values = Output(Vec(2, new Operand(p)))
+    val fQuery = Input(Vec(3, new RobTag(p)))
+    val fValues = Output(Vec(3, new Operand(p)))
     val vectorQuery = Input(Vec(4, new RobTag(p)))
     val vectorValues = Output(Vec(4, new VectorOperand(p)))
     val flush = Input(Bool())
@@ -25,6 +31,7 @@ class Rob(p: XJParams) extends Module {
 
   private val resultBits = log2Ceil(p.nXRes)
   private val vectorResultBits = log2Ceil(p.nVRes)
+  private val fResultBits = log2Ceil(p.nFRes)
   private val maxGeneration = ((BigInt(1) << p.generationBits) - 1).U
   private val maxSequence = ((BigInt(1) << p.seqBits) - 1).U
   val valid = RegInit(VecInit(Seq.fill(p.nRob)(false.B)))
@@ -34,14 +41,22 @@ class Rob(p: XJParams) extends Module {
   val resultIndex = Reg(Vec(p.nRob, UInt(resultBits.W)))
   val hasVectorResult = Reg(Vec(p.nRob, Bool()))
   val vectorResultIndex = Reg(Vec(p.nRob, UInt(vectorResultBits.W)))
+  val hasFResult = Reg(Vec(p.nRob, Bool()))
+  val fResultIndex = Reg(Vec(p.nRob, UInt(fResultBits.W)))
+  val fflags = Reg(Vec(p.nRob, UInt(5.W)))
+  val csrWrEn = Reg(Vec(p.nRob, Bool()))
+  val csrAddr = Reg(Vec(p.nRob, UInt(12.W)))
+  val csrData = Reg(Vec(p.nRob, UInt(32.W)))
   val exception = Reg(Vec(p.nRob, Bool()))
-  val cause = Reg(Vec(p.nRob, UInt(4.W)))
+  val cause = Reg(Vec(p.nRob, UInt(5.W)))
   val badAddr = Reg(Vec(p.nRob, UInt(32.W)))
   val nextPc = Reg(Vec(p.nRob, UInt(32.W)))
   val resultUsed = RegInit(VecInit(Seq.fill(p.nXRes)(false.B)))
   val resultData = Reg(Vec(p.nXRes, UInt(32.W)))
   val vectorResultUsed = RegInit(VecInit(Seq.fill(p.nVRes)(false.B)))
-  val vectorResultData = Reg(Vec(p.nVRes, UInt(512.W)))
+  val vectorResultData = Reg(Vec(p.nVRes, UInt(p.vlen.W)))
+  val fResultUsed = RegInit(VecInit(Seq.fill(p.nFRes)(false.B)))
+  val fResultData = Reg(Vec(p.nFRes, UInt(32.W)))
 
   val headIndex = RegInit(0.U(p.robBits.W))
   val tailIndex = RegInit(0.U(p.robBits.W))
@@ -62,13 +77,18 @@ class Rob(p: XJParams) extends Module {
   val freeVectorResults = ~vectorResultUsed.asUInt
   val freeVectorResultIndex = Wire(UInt(vectorResultBits.W))
   freeVectorResultIndex := PriorityEncoder(freeVectorResults)
+  val needsFResult = io.allocate.bits.writesF && !io.allocate.bits.exception
+  val freeFResults = ~fResultUsed.asUInt
+  val freeFResultIndex = Wire(UInt(fResultBits.W))
+  freeFResultIndex := PriorityEncoder(freeFResults)
   val mustDrain = sequenceExhausted || generationExhausted(tailIndex)
   io.empty := count === 0.U
   io.allocTag.slot := tailIndex
   io.allocTag.generation := nextGeneration(tailIndex)
   io.allocSeq := nextSequence
   io.allocate.ready := !io.flush && !mustDrain && count =/= p.nRob.U &&
-    (!needsResult || freeResults.orR) && (!needsVectorResult || freeVectorResults.orR)
+    (!needsResult || freeResults.orR) && (!needsVectorResult || freeVectorResults.orR) &&
+    (!needsFResult || freeFResults.orR)
 
   io.head.valid := !io.empty && !io.flush
   io.head.bits := uops(headIndex)
@@ -76,7 +96,12 @@ class Rob(p: XJParams) extends Module {
   io.retire.bits.uop := uops(headIndex)
   io.retire.bits.data := Mux(exception(headIndex), 0.U,
     Mux(hasVectorResult(headIndex), vectorResultData(vectorResultIndex(headIndex)),
-      Mux(hasResult(headIndex), resultData(resultIndex(headIndex)), 0.U)))
+      Mux(hasResult(headIndex), resultData(resultIndex(headIndex)),
+        Mux(hasFResult(headIndex), fResultData(fResultIndex(headIndex)), 0.U))))
+  io.retire.bits.fflags := fflags(headIndex)
+  io.retire.bits.csrWrEn := csrWrEn(headIndex)
+  io.retire.bits.csrAddr := csrAddr(headIndex)
+  io.retire.bits.csrData := csrData(headIndex)
   io.retire.bits.exception := exception(headIndex)
   io.retire.bits.cause := cause(headIndex)
   io.retire.bits.badAddr := badAddr(headIndex)
@@ -94,6 +119,14 @@ class Rob(p: XJParams) extends Module {
     io.values(port).ready := readable
     io.values(port).value := Mux(readable, resultData(resultIndex(slot)), 0.U)
   }
+  for (port <- 0 until 3) {
+    val slot = io.fQuery(port).slot
+    val readable = !io.flush && valid(slot) && done(slot) && hasFResult(slot) &&
+      !exception(slot) && TagMatch(uops(slot).tag, io.fQuery(port))
+    io.fValues(port).tag := io.fQuery(port)
+    io.fValues(port).ready := readable
+    io.fValues(port).value := Mux(readable, fResultData(fResultIndex(slot)), 0.U)
+  }
   for (port <- 0 until 4) {
     val slot = io.vectorQuery(port).slot
     val readable = !io.flush && valid(slot) && done(slot) && hasVectorResult(slot) &&
@@ -109,11 +142,18 @@ class Rob(p: XJParams) extends Module {
     cause(wbSlot) := io.wb.bits.cause
     badAddr(wbSlot) := io.wb.bits.badAddr
     nextPc(wbSlot) := io.wb.bits.nextPc
+    fflags(wbSlot) := io.wb.bits.fflags
+    csrWrEn(wbSlot) := io.wb.bits.csrWrEn
+    csrAddr(wbSlot) := io.wb.bits.csrAddr
+    csrData(wbSlot) := io.wb.bits.csrData
     when(hasResult(wbSlot) && !io.wb.bits.exception) {
       resultData(resultIndex(wbSlot)) := io.wb.bits.data(31, 0)
     }
     when(hasVectorResult(wbSlot) && !io.wb.bits.exception) {
       vectorResultData(vectorResultIndex(wbSlot)) := io.wb.bits.data
+    }
+    when(hasFResult(wbSlot) && !io.wb.bits.exception) {
+      fResultData(fResultIndex(wbSlot)) := io.wb.bits.data(31, 0)
     }
   }
 
@@ -127,6 +167,9 @@ class Rob(p: XJParams) extends Module {
     when(hasVectorResult(headIndex)) {
       vectorResultUsed(vectorResultIndex(headIndex)) := false.B
     }
+    when(hasFResult(headIndex)) {
+      fResultUsed(fResultIndex(headIndex)) := false.B
+    }
   }
 
   when(io.allocate.fire) {
@@ -137,6 +180,8 @@ class Rob(p: XJParams) extends Module {
     resultIndex(tailIndex) := freeResultIndex
     hasVectorResult(tailIndex) := needsVectorResult
     vectorResultIndex(tailIndex) := freeVectorResultIndex
+    hasFResult(tailIndex) := needsFResult
+    fResultIndex(tailIndex) := freeFResultIndex
     exception(tailIndex) := io.allocate.bits.exception
     cause(tailIndex) := io.allocate.bits.cause
     badAddr(tailIndex) := io.allocate.bits.badAddr
@@ -147,6 +192,9 @@ class Rob(p: XJParams) extends Module {
     }
     when(needsVectorResult) {
       vectorResultUsed(freeVectorResultIndex) := true.B
+    }
+    when(needsFResult) {
+      fResultUsed(freeFResultIndex) := true.B
     }
     when(nextGeneration(tailIndex) === maxGeneration) {
       generationExhausted(tailIndex) := true.B
@@ -180,6 +228,12 @@ class Rob(p: XJParams) extends Module {
     done.foreach(_ := false.B)
     resultUsed.foreach(_ := false.B)
     vectorResultUsed.foreach(_ := false.B)
+    fResultUsed.foreach(_ := false.B)
     count := 0.U
   }
+
+  // Writeback ownership is checked combinationally: stale generations and
+  // duplicate broadcasts of completed entries are rejected by wbAccepted
+  // (covered by BackendSpec); dispatch never overlaps flush.
+  assert(!(io.allocate.fire && io.flush), "no dispatch during flush")
 }

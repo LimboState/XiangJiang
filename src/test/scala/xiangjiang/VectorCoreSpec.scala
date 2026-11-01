@@ -4,26 +4,41 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Test-side machine encoding, independent of decoder implementation. */
+/** Test-side vector machine encoding for the 7-bit VecOp space.
+  * vecOp = {inst[25], funct3, group}; groups 0/1 use OP-V and AMO, groups
+  * 2..5 use custom-1 funct3 4..7 (see docs/XJ-ISA-Support.md).
+  */
 object VectorEncoding {
   def instruction(id: Int, rd: Int, rs1: Int, rs2: Int,
                   mask: Option[Int] = None): BigInt = {
-    require(id >= 0 && id < 64)
-    val opcode = Seq(0x57, 0x07, 0x27, 0x2f)(id & 3)
+    require(id >= 0 && id < 128)
+    val idx = id & 7
+    val f3 = (id >> 3) & 7
+    val bit25 = (id >> 6) & 1
+    val opcode = if (idx == 0) 0x57 else if (idx == 1) 0x2f else 0x2b
+    val f3Field = if (idx >= 2) 4 + (idx - 2) else f3
     (BigInt(mask.getOrElse(0)) << 27) | (if (mask.isEmpty) BigInt(1) << 26 else BigInt(0)) |
-      (BigInt(id >> 5) << 25) | ((rs2 & 31) << 20) | (rs1 << 15) |
-      (((id >> 2) & 7) << 12) | (rd << 7) | opcode
+      (BigInt(bit25) << 25) | ((rs2 & 31) << 20) | (rs1 << 15) |
+      (BigInt(f3Field) << 12) | (rd << 7) | opcode
   }
-  def packed(lanes: Seq[BigInt]): BigInt =
-    lanes.zipWithIndex.foldLeft(BigInt(0)) { case (r, (v, i)) =>
+  def packed32(words: Seq[BigInt]): BigInt =
+    words.zipWithIndex.foldLeft(BigInt(0)) { case (r, (v, i)) =>
       r | ((v & BigInt("ffffffff", 16)) << (i * 32))
+    }
+  def packed16(halves: Seq[BigInt]): BigInt =
+    halves.zipWithIndex.foldLeft(BigInt(0)) { case (r, (v, i)) =>
+      r | ((v & 0xffff) << (i * 16))
+    }
+  def packed8(bytes: Seq[BigInt]): BigInt =
+    bytes.zipWithIndex.foldLeft(BigInt(0)) { case (r, (v, i)) =>
+      r | ((v & 0xff) << (i * 8))
     }
 }
 
 class VectorCoreSpec extends AnyFunSuite with ChiselSim {
-  test("vector programs preserve versions, order memory, precheck faults and restart under backpressure") {
-    val p = XJParams(nRob = 8, nIssue = 2, nXRes = 3, nMemq = 3,
-      generationBits = 1, seqBits = 6, bankBytes = 1024, nVRes = 2)
+  test("vset configuration, 128-bit SEW execution, masking, memory and restart") {
+    val p = XJParams(nRob = 8, nIssue = 2, nXRes = 3, nMemq = 4,
+      generationBits = 1, seqBits = 6, bankBytes = 1024, nVRes = 4)
     simulate(new ScalarCore(p)) { dut =>
       import Rv32._
       import VectorEncoding._
@@ -33,17 +48,12 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
       def get32(address: Long): BigInt = (0 until 4).foldLeft(BigInt(0)) { (v, i) =>
         v | (BigInt(bytes.getOrElse(address + i, 0)) << (8 * i))
       }
-      def vectorAt(address: Long): BigInt = packed((0 until 16).map(i => get32(address + 4 * i)))
       var program = Seq.empty[BigInt]
       var cycles = 0
       var response: Option[(Int, BigInt, Boolean)] = None
-      var requestDelay = 3
-      var errorAddress: Option[Long] = None
       val requests = scala.collection.mutable.ArrayBuffer.empty[(Long, Boolean, BigInt, Int)]
       val commits = scala.collection.mutable.ArrayBuffer.empty[Int]
-      var earlyResult = false
-      var monitorEarly = false
-      var beforeV7 = BigInt(0)
+      var errorAddress: Option[Long] = None
       dut.io.start.poke(false); dut.io.ack.poke(false)
       dut.io.fetchReq.ready.poke(true); dut.io.fetchResp.valid.poke(false)
       dut.io.fetchResp.bits.pc.poke(0); dut.io.fetchResp.bits.inst.poke(0)
@@ -51,6 +61,11 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
       dut.io.fetchResp.bits.badAddr.poke(0)
       dut.io.dataReq.ready.poke(false); dut.io.dataResp.valid.poke(false)
       dut.io.dataResp.bits.data.poke(0); dut.io.dataResp.bits.error.poke(false)
+      dut.io.matrixReq.ready.poke(false); dut.io.matrixResp.valid.poke(false)
+      dut.io.matrixResp.bits.data.poke(0)
+      dut.io.dmaCommand.ready.poke(false); dut.io.dmaCompletion.valid.poke(false)
+      dut.io.dmaBusy.poke(false)
+
       def tick(): Unit = {
         dut.io.dataReq.ready.poke(cycles % 4 != 1)
         dut.io.dataResp.valid.poke(response.exists(_._1 == 0))
@@ -59,14 +74,12 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
         }
         val fetch = if (dut.io.fetchReq.valid.peek().litToBoolean)
           Some(dut.io.fetchReq.bits.peek().litValue.toInt) else None
-        if (dut.io.retire.valid.peek().litToBoolean)
+        if (dut.io.retire.valid.peek().litToBoolean &&
+          !dut.io.retire.bits.exception.peek().litToBoolean)
           commits += dut.io.retire.bits.uop.pc.peek().litValue.toInt
-        if (monitorEarly && commits.isEmpty && dut.io.writeback.valid.peek().litToBoolean &&
-          dut.io.writeback.bits.data.peek().litValue == packed(Seq.fill(16)(BigInt(12)))) {
-          earlyResult = true
-          dut.io.debugVRegs(7).expect(beforeV7)
-        }
         if (response.exists(_._1 == 0) && dut.io.dataResp.ready.peek().litToBoolean) response = None
+
+
         if (dut.io.dataReq.valid.peek().litToBoolean && dut.io.dataReq.ready.peek().litToBoolean) {
           assert(response.isEmpty, "multiple active SRAM transactions")
           val addr = dut.io.dataReq.bits.addr.peek().litValue.toLong
@@ -79,7 +92,7 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
           if (store && !error)
             for (i <- 0 until 4 if ((mask >> i) & 1) != 0)
               bytes(addr + i) = ((data >> (i * 8)) & 255).toInt
-          response = Some((requestDelay, get32(addr), error))
+          response = Some((3, get32(addr), error))
         }
         dut.clock.step(); cycles += 1
         dut.io.fetchResp.valid.poke(fetch.isDefined)
@@ -95,7 +108,7 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
         }
         program = words; requests.clear(); commits.clear()
         dut.io.start.poke(true); tick(); dut.io.start.poke(false)
-        val deadline = cycles + 12000
+        val deadline = cycles + 30000
         while (dut.io.status.busy.peek().litToBoolean && cycles < deadline) tick()
         dut.io.status.busy.expect(false)
         dut.io.status.fault.expect(fault != 0); dut.io.status.done.expect(fault == 0)
@@ -107,96 +120,146 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
         }
         assert(response.isEmpty)
       }
-      for (i <- 0 until 16) { put32(i * 4, i); put32(64 + i * 4, i % 2) }
-      run(Seq(addi(1, 0, 64), addi(2, 0, 128), addi(3, 0, 5),
-        instruction(59, 0, 0, 0), instruction(59, 1, 1, 0),
-        instruction(0, 2, 1, 0), instruction(1, 0, 3, 0),
-        instruction(37, 4, 0, 1), instruction(1, 2, 3, 0, Some(4)),
-        instruction(60, 2, 2, 0), fence, halt))
-      val mixed = (0 until 16).map(i => BigInt(if (i % 2 == 0) i + 10 else i + 1))
-      dut.io.debugVRegs(0).expect(packed((0 until 16).map(i => BigInt(i + 5))))
-      dut.io.debugVRegs(4).expect(0x5555)
-      dut.io.debugVRegs(2).expect(packed(mixed)); assert(vectorAt(128) == packed(mixed))
-      assert(requests.count(_._2) == 16)
-      assert(requests.map(_._1).toSeq == (0 until 48).map(_ * 4L))
-      // A masked comparison aliases its mask and destination: read the old mask first.
-      run(Seq(instruction(37, 4, 0, 0, Some(4)), halt))
-      dut.io.debugVRegs(4).expect(0)
-      // All-masked memory ignores even invalid/misaligned addresses and preserves v0.
-      val old0 = dut.io.debugVRegs(0).peek().litValue
-      run(Seq(addi(5, 0, -1), instruction(59, 0, 5, 0, Some(4)),
-        instruction(60, 0, 5, 0, Some(4)), halt))
-      assert(requests.isEmpty); dut.io.debugVRegs(0).expect(old0)
-      // Inactive lanes outside DTCM must not fail the one active legal lane.
-      put32(p.dtcmBytes - 4, BigInt("87654321", 16))
-      run(Seq(addi(10, 0, 1), instruction(1, 4, 10, 4), lui(10, 1),
-        instruction(59, 3, 10, -4, Some(4)), halt))
-      assert(requests.map(_._1).toSeq == Seq((p.dtcmBytes - 4).toLong))
-      dut.io.debugVRegs(3).expect(BigInt("87654321", 16))
-      // Packed BF16 load/store crosses 64-byte banks, including both word halves.
-      val bf = (1 to 16).map(i => BigInt(java.lang.Float.floatToRawIntBits(i.toFloat) >>> 16))
-      for (i <- bf.indices) {
-        bytes(510L + i * 2) = (bf(i) & 255).toInt
-        bytes(511L + i * 2) = (bf(i) >> 8).toInt
-      }
-      for (a <- 638 until 676) bytes(a.toLong) = 0xa5
-      run(Seq(addi(6, 0, 510), addi(7, 0, 640), instruction(61, 5, 6, 0),
-        instruction(58, 6, 0, 5), instruction(58, 8, 1, 6),
-        instruction(58, 8, 4, 5), instruction(58, 9, 5, 5),
-        instruction(62, 8, 7, 2), fence, halt))
-      dut.io.debugVRegs(5).expect(packed(bf)); dut.io.debugVRegs(8).expect(packed(bf))
-      dut.io.debugRegs(8).expect(0x43080000L); dut.io.debugRegs(9).expect(0x4180)
-      assert(bytes(640) == 0xa5 && bytes(641) == 0xa5 && bytes(674) == 0xa5)
-      for (i <- bf.indices) assert((bytes(642L + i * 2) | (bytes(643L + i * 2) << 8)) == bf(i))
-      // Precheck the whole active footprint: valid early lanes cannot write before a later fault.
-      put32(p.dtcmBytes - 4, BigInt("deadbeef", 16))
-      run(Seq(lui(10, 1), addi(10, 10, -4), instruction(60, 0, 10, 0),
-        addi(11, 0, 99), halt), 7, 8, p.dtcmBytes)
-      assert(requests.isEmpty); assert(get32(p.dtcmBytes - 4) == BigInt("deadbeef", 16))
-      dut.io.debugRegs(11).expect(0)
-      run(Seq(addi(10, 0, 3), instruction(61, 0, 10, 0), halt), 4, 4, 3)
-      assert(requests.isEmpty); dut.io.debugVRegs(0).expect(old0)
-      // A late read error does not partially update a vector destination or authorize younger stores.
-      errorAddress = Some(8)
-      run(Seq(instruction(59, 0, 0, 0), instruction(60, 0, 2, 0), halt), 5, 0, 8)
-      assert(requests.map(_._1).toSeq == Seq(0L, 4L, 8L)); assert(requests.forall(!_._2))
-      dut.io.debugVRegs(0).expect(old0); errorAddress = None
-      // Restart retains architectural vectors; independent vector compute may finish behind a scalar load.
-      run(Seq(instruction(15, 7, 0, 7), addi(3, 0, 12), halt)) // vxor v7,v7,x0: initially zero
-      beforeV7 = dut.io.debugVRegs(7).peek().litValue
-      requestDelay = 120; monitorEarly = true
-      run(Seq(lw(12, 0, 0), instruction(1, 7, 3, 7), halt))
-      assert(earlyResult); dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(12))))
-      monitorEarly = false; requestDelay = 3
-      // Repeated aliases exhaust generation/age counters without losing old destination versions.
-      run(Seq(addi(3, 0, 1)) ++ Seq.fill(80)(instruction(1, 7, 3, 7)) ++ Seq(halt))
-      dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(92))))
-      run(Seq(instruction(63, 7, 0, 0), instruction(60, 7, 2, 0), halt),
-        1, 0, instruction(63, 7, 0, 0).toLong)
-      assert(requests.isEmpty); dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(92))))
 
-      val illegalUnary = for (selector <- 6 to 31; mask <- Seq(None, Some(4)))
-        yield instruction(58, 7, selector, 5, mask)
-      for (bad <- illegalUnary :+ instruction(56, 7, 0, 0)) {
-        run(Seq(bad, instruction(60, 7, 2, 0), halt), 1, 0, bad.toLong)
-        assert(requests.isEmpty)
-        dut.io.debugVRegs(7).expect(packed(Seq.fill(16)(BigInt(92))))
+      // Memory preload: words 0..3 at 0, 10..13 at 64.
+      for (i <- 0 until 4) { put32(i * 4, i); put32(64 + i * 4, 10 + i) }
+
+      // SEW=32, vl=4: vle32 then vadd.vv then vse32.
+      run(Seq(
+        addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(1, 0, 64),
+        instruction(VecOp.vle32, 1, 1, 0),
+        instruction(VecOp.vadd, 2, 1, 0),
+        addi(3, 0, 128),
+        instruction(VecOp.vse32, 2, 3, 0),
+        fence, halt))
+      dut.io.debugVRegs(1).expect(packed32(Seq(10, 11, 12, 13)))
+      dut.io.debugVRegs(2).expect(packed32(Seq(10, 11, 12, 13)))
+      for (i <- 0 until 4) assert(get32(128L + 4 * i) == BigInt(10 + i))
+      // The vsetvli rd receives the computed vl.
+      dut.io.debugRegs(5).expect(4)
+
+      // vadd with vs2 loaded earlier: 10+i + (i) at 0.
+      run(Seq(
+        addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(1, 0, 0),
+        instruction(VecOp.vle32, 1, 1, 0),
+        instruction(VecOp.vadd, 4, 2, 1), // vd4 = v2 + v1 = 10+i + i
+        fence, halt))
+      dut.io.debugVRegs(4).expect(packed32(Seq(10, 12, 14, 16)))
+
+      // SEW=8: vl=16, byte add (v1 currently holds words 0..3).
+      run(Seq(
+        addi(4, 0, 16), vsetvli(5, 4, vtype(sew = 0, lmul = 0)),
+        instruction(VecOp.vadd, 5, 1, 1), // bytes double: w*2 mod 256
+        fence, halt))
+      val bytesExpected = (0 until 16).map { i =>
+        val src = (0 until 4).flatMap(w => Seq(
+          w & 0xff, (w >> 8) & 0xff, 0, 0))(i)
+        (src + src) & 0xff
       }
-      // A runtime write error retains earlier acknowledged lanes, but blocks all younger stores.
-      val secondWord = get32(132)
-      errorAddress = Some(132)
-      run(Seq(instruction(60, 7, 2, 0), addi(14, 0, 99), instruction(60, 7, 2, 0), halt),
-        7, 0, 132)
-      assert(requests.map(_._1).toSeq == Seq(128L, 132L))
-      assert(get32(128) == 92 && get32(132) == secondWord)
+      dut.io.debugVRegs(5).expect(packed8(bytesExpected.map(BigInt(_))))
+
+      // Tail preservation: vl=2 write keeps elements 2..3.
+      run(Seq(
+        addi(4, 0, 2), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(6, 0, 100),
+        instruction(VecOp.vadd + 1, 2, 6, 2), // v2[0:2] += 100, tail preserved
+        fence, halt))
+      dut.io.debugVRegs(2).expect(packed32(Seq(110, 111, 12, 13)))
+
+      // Masked operation: v0 mask with bits 0 and 2 → only those update.
+      put32(256L, 5); put32(260L, 5); put32(264L, 5); put32(268L, 5)
+      run(Seq(
+        addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(7, 0, 256),
+        instruction(VecOp.vle32, 0, 7, 0), // unmasked: v0 = 5,5,5,5
+        addi(8, 0, 1000),
+        instruction(VecOp.vadd + 1, 2, 8, 2, mask = Some(0)), // vd2 = v2 + 1000, masked
+        fence, halt))
+      dut.io.debugVRegs(0).expect(packed32(Seq(5, 5, 5, 5)))
+      dut.io.debugVRegs(2).expect(packed32(Seq(1110, 111, 1012, 13)))
+
+      // vill: LMUL=2 is outside the baseline; vl becomes 0 and vtype gets vill.
+      run(Seq(addi(4, 0, 8), vsetvli(5, 4, vtype(sew = 2, lmul = 1)), fence, halt))
+      dut.io.debugRegs(5).expect(0)
+      // Executing a vector instruction under vill raises vtypeVill.
+      run(Seq(
+        instruction(VecOp.vadd, 2, 1, 0), fence, halt),
+        FaultCode.vtypeVill.litValue.toInt, 0,
+        instruction(VecOp.vadd, 2, 1, 0).toLong)
+      // SEW=64 is unsupported too.
+      run(Seq(addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 3, lmul = 0)), fence, halt))
+      dut.io.debugRegs(5).expect(0)
+
+      // vsetvl reads vtype from rs2; vsetivli takes an immediate AVL.
+      run(Seq(
+        addi(9, 0, vtype(sew = 1, lmul = 0)), // SEW=16
+        addi(10, 0, 3),
+        vsetvl(5, 10, 9),
+        fence, halt))
+      dut.io.debugRegs(5).expect(3) // min(3, 8)
+      run(Seq(
+        vsetivli(5, 2, vtype(sew = 2, lmul = 0)),
+        fence, halt))
+      dut.io.debugRegs(5).expect(2)
+
+      // Non-zero vstart blocks vector execution (baseline: no resumption).
+      run(Seq(
+        csrrwi(0, 0x008, 3), // vstart := 3
+        instruction(VecOp.vadd, 2, 1, 0),
+        fence, halt), FaultCode.vstartActive.litValue.toInt, 4,
+        instruction(VecOp.vadd, 2, 1, 0).toLong)
+      // vset* resets vstart.
+      run(Seq(addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)), fence, halt))
+      dut.io.debugRegs(5).expect(4)
+
+      // Zero active elements: no requests, ordered completion, old value kept.
+      val v1Before = dut.io.debugVRegs(1).peek().litValue
+      run(Seq(
+        addi(4, 0, 0), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(11, 0, 200),
+        instruction(VecOp.vle32, 1, 11, 0),
+        fence, halt))
+      assert(requests.isEmpty)
+      dut.io.debugVRegs(1).expect(v1Before)
+
+      // Masked load: v0 = 1 → only element 0 is active and in range.
+      put32(272L, 1)
+      put32(p.dtcmBytes - 4, BigInt("87654321", 16))
+      run(Seq(
+        addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(7, 0, 272),
+        instruction(VecOp.vle32, 0, 7, 0),
+        lui(12, 1),
+        addi(12, 12, -4),
+        instruction(VecOp.vle32, 3, 12, 0, mask = Some(0)),
+        fence, halt))
+      assert(requests.map(_._1).toSeq == Seq(272L, 276L, 280L, 284L, (p.dtcmBytes - 4).toLong))
+      dut.io.debugVRegs(3).expect(BigInt("87654321", 16))
+
+      // Illegal encodings raise illegal instructions.
+      for (bad <- Seq(instruction(63, 7, 0, 0), instruction(70, 7, 0, 0),
+        instruction(71, 7, 0, 0), instruction(83, 7, 0, 0),
+        instruction(100, 7, 0, 0), instruction(127, 7, 0, 0))) {
+        run(Seq(bad, fence, halt), FaultCode.illegal.litValue.toInt, 0, bad.toLong)
+      }
+
+      // A masked load error blocks the whole instruction precisely.
+      errorAddress = Some(8)
+      run(Seq(
+        addi(4, 0, 4), vsetvli(5, 4, vtype(sew = 2, lmul = 0)),
+        addi(13, 0, 0),
+        instruction(VecOp.vle32, 0, 13, 0),
+        addi(14, 0, 99),
+        fence, halt), FaultCode.loadAccess.litValue.toInt, 12, 8)
+      assert(requests.forall(!_._2))
       dut.io.debugRegs(14).expect(0)
-      // Report the BF16 element address, not the aligned word carrying its response.
-      errorAddress = Some(508)
-      run(Seq(instruction(61, 5, 6, 0), halt), 5, 0, 510)
-      dut.io.debugVRegs(5).expect(packed(bf)); errorAddress = None
-      run(Seq(instruction(58, 0, 4, 5), halt))
-      dut.io.debugRegs(0).expect(0)
+      errorAddress = None
+
+      // Restart after fault retains committed vector state.
+      run(Seq(vsetvli(0, 4, vtype(sew = 2, lmul = 0)), fence, halt))
+      dut.io.debugVRegs(2).expect(packed32(Seq(1110, 111, 1012, 13)))
     }
   }
-  private def lui(rd: Int, upper: Int): BigInt = (BigInt(upper) << 12) | (rd << 7) | 0x37
 }

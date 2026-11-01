@@ -26,7 +26,10 @@ class MemorySubsystem(p: XJParams) extends Module {
   })
   val itcm = Module(new InstructionTcm(p))
   val dtcm = Module(new DataTcm(p))
-  val dtcmBase = "h10000000".U(32.W)
+  // Host window offsets per docs/XJ-NPU.md 7.3: ITCM 0x000000-0x03FFFF,
+  // Reserved 0x040000-0x0FFFFF, DTCM 0x100000-0x1FFFFF.
+  val itcmWindowBytes = 0x40000
+  val dtcmBase = "h100000".U(32.W)
 
   def burstBytes(a: AxiAddress): UInt = ((a.len +& 1.U).pad(34) << a.size)(33, 0)
   def beatBytes(a: AxiAddress): UInt = (1.U(34.W) << a.size)(33, 0)
@@ -36,8 +39,8 @@ class MemorySubsystem(p: XJParams) extends Module {
     val start = a.addr.pad(34)
     val lower = Mux(a.burst === 2.U, start & ~(span - 1.U), start)
     val upper = lower + Mux(a.burst === 0.U, bytes, span) - 1.U
-    val inItcm = lower < p.itcmBytes.U && upper < p.itcmBytes.U
-    val inDtcm = lower >= dtcmBase && upper < (BigInt("10000000", 16) + p.dtcmBytes).U
+    val inItcm = lower < itcmWindowBytes.U && upper < itcmWindowBytes.U
+    val inDtcm = lower >= dtcmBase && upper < (dtcmBase + p.dtcmBytes.U)
     val wrapLength = a.len === 1.U || a.len === 3.U || a.len === 7.U || a.len === 15.U
     a.size > 2.U || (start & (bytes - 1.U)) =/= 0.U || a.lock =/= 0.U ||
       a.burst === 3.U || (a.burst === 0.U && a.len > 15.U) ||
@@ -99,6 +102,7 @@ class MemorySubsystem(p: XJParams) extends Module {
     ar := io.axi.ar.bits
     rAddress := io.axi.ar.bits.addr
     rBeat := 0.U
+
     rError := burstError(io.axi.ar.bits) || io.coreBusy
   }
   when(io.axi.r.fire) {

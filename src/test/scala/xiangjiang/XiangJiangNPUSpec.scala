@@ -12,6 +12,7 @@ object Rv32 {
   def r(rd: Int, f3: Int, rs1: Int, rs2: Int, f7: Int = 0): BigInt =
     (BigInt(f7) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | 0x33
   def addi(rd: Int, rs1: Int, imm: Int): BigInt = i(0x13, rd, 0, rs1, imm)
+  def lui(rd: Int, imm: Int): BigInt = (BigInt(imm & 0xfffff) << 12) | (rd << 7) | 0x37
   def lb(rd: Int, rs1: Int, imm: Int): BigInt = i(3, rd, 0, rs1, imm)
   def lh(rd: Int, rs1: Int, imm: Int): BigInt = i(3, rd, 1, rs1, imm)
   def lbu(rd: Int, rs1: Int, imm: Int): BigInt = i(3, rd, 4, rs1, imm)
@@ -29,9 +30,99 @@ object Rv32 {
     (BigInt((imm >> 20) & 1) << 31) | (((imm >> 1) & 1023) << 21) |
       (((imm >> 11) & 1) << 20) | (((imm >> 12) & 255) << 12) | (rd << 7) | 0x6f
   val fence: BigInt = BigInt("0ff0000f", 16)
+  val fencei: BigInt = BigInt("0000100f", 16)
   val ecall: BigInt = BigInt("00000073", 16)
   val ebreak: BigInt = BigInt("00100073", 16)
   val halt: BigInt = BigInt("0000000b", 16)
+  def csrrw(rd: Int, csr: Int, rs1: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (rs1 << 15) | (1 << 12) | (rd << 7) | 0x73
+  def csrrs(rd: Int, csr: Int, rs1: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (rs1 << 15) | (2 << 12) | (rd << 7) | 0x73
+  def csrrc(rd: Int, csr: Int, rs1: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (rs1 << 15) | (3 << 12) | (rd << 7) | 0x73
+  def csrrwi(rd: Int, csr: Int, uimm: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (uimm << 15) | (5 << 12) | (rd << 7) | 0x73
+  def csrrsi(rd: Int, csr: Int, uimm: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (uimm << 15) | (6 << 12) | (rd << 7) | 0x73
+  def csrrci(rd: Int, csr: Int, uimm: Int): BigInt =
+    (BigInt(csr & 0xfff) << 20) | (uimm << 15) | (7 << 12) | (rd << 7) | 0x73
+  def mul(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 0, rs1, rs2, 1)
+  def mulh(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 1, rs1, rs2, 1)
+  def mulhsu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 2, rs1, rs2, 1)
+  def mulhu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 3, rs1, rs2, 1)
+  def div(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 4, rs1, rs2, 1)
+  def divu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 5, rs1, rs2, 1)
+  def rem(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 6, rs1, rs2, 1)
+  def remu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 7, rs1, rs2, 1)
+  def clz(rd: Int, rs1: Int): BigInt = i(0x13, rd, 1, rs1, 0x600)
+  def ctz(rd: Int, rs1: Int): BigInt = i(0x13, rd, 1, rs1, 0x601)
+  def cpop(rd: Int, rs1: Int): BigInt = i(0x13, rd, 1, rs1, 0x602)
+  def sextb(rd: Int, rs1: Int): BigInt = i(0x13, rd, 1, rs1, 0x604)
+  def sexth(rd: Int, rs1: Int): BigInt = i(0x13, rd, 1, rs1, 0x605)
+  def andn(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 7, rs1, rs2, 0x20)
+  def orn(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 6, rs1, rs2, 0x20)
+  def xnor(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 4, rs1, rs2, 0x20)
+  def min(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 4, rs1, rs2, 0x05)
+  def minu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 5, rs1, rs2, 0x05)
+  def max(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 6, rs1, rs2, 0x05)
+  def maxu(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 7, rs1, rs2, 0x05)
+  def rol(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 1, rs1, rs2, 0x30)
+  def ror(rd: Int, rs1: Int, rs2: Int): BigInt = r(rd, 5, rs1, rs2, 0x30)
+  def rori(rd: Int, rs1: Int, shamt: Int): BigInt = i(0x13, rd, 5, rs1, 0x600 | (shamt & 31))
+  def rev8(rd: Int, rs1: Int): BigInt = i(0x13, rd, 5, rs1, 0x698)
+  def orcb(rd: Int, rs1: Int): BigInt = i(0x13, rd, 5, rs1, 0x287)
+  def zexth(rd: Int, rs1: Int): BigInt = r(rd, 4, rs1, 0, 0x04)
+  // F extension selection.
+  def flw(frd: Int, rs1: Int, imm: Int): BigInt = i(0x07, frd, 2, rs1, imm)
+  def fsw(frs2: Int, rs1: Int, imm: Int): BigInt =
+    (BigInt((imm >> 5) & 0x7f) << 25) | (frs2 << 20) | (rs1 << 15) | (2 << 12) | ((imm & 31) << 7) | 0x27
+  def fadds(frd: Int, frs1: Int, frs2: Int, rm: Int = 0): BigInt =
+    (BigInt(0x00) << 25) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x53
+  def fsubs(frd: Int, frs1: Int, frs2: Int, rm: Int = 0): BigInt =
+    (BigInt(0x04) << 25) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x53
+  def fmuls(frd: Int, frs1: Int, frs2: Int, rm: Int = 0): BigInt =
+    (BigInt(0x08) << 25) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x53
+  def fdivs(frd: Int, frs1: Int, frs2: Int, rm: Int = 0): BigInt =
+    (BigInt(0x0c) << 25) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x53
+  def fsqrts(frd: Int, frs1: Int, rm: Int = 0): BigInt =
+    (BigInt(0x2c) << 25) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x53
+  def feqs(rd: Int, frs1: Int, frs2: Int): BigInt =
+    (BigInt(0x50) << 25) | (frs2 << 20) | (frs1 << 15) | (2 << 12) | (rd << 7) | 0x53
+  def flts(rd: Int, frs1: Int, frs2: Int): BigInt =
+    (BigInt(0x50) << 25) | (frs2 << 20) | (frs1 << 15) | (1 << 12) | (rd << 7) | 0x53
+  def fles(rd: Int, frs1: Int, frs2: Int): BigInt =
+    (BigInt(0x50) << 25) | (frs2 << 20) | (frs1 << 15) | (0 << 12) | (rd << 7) | 0x53
+  def fcvtsw(rd: Int, rs1: Int, rm: Int = 0): BigInt =
+    (BigInt(0x68) << 25) | (rs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+  def fcvtswu(rd: Int, rs1: Int, rm: Int = 0): BigInt =
+    (BigInt(0x68) << 25) | (1 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+  def fcvtws(rd: Int, frs1: Int, rm: Int = 0): BigInt =
+    (BigInt(0x60) << 25) | (frs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+  def fcvtwus(rd: Int, frs1: Int, rm: Int = 0): BigInt =
+    (BigInt(0x60) << 25) | (1 << 20) | (frs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+  def fmvxw(rd: Int, frs1: Int): BigInt =
+    (BigInt(0x70) << 25) | (frs1 << 15) | (rd << 7) | 0x53
+  def fmvwx(frd: Int, rs1: Int): BigInt =
+    (BigInt(0x78) << 25) | (rs1 << 15) | (frd << 7) | 0x53
+  def fmadds(frd: Int, frs1: Int, frs2: Int, frs3: Int, rm: Int = 0): BigInt =
+    (frs3 << 27) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x43
+  def fmsubs(frd: Int, frs1: Int, frs2: Int, frs3: Int, rm: Int = 0): BigInt =
+    (frs3 << 27) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x47
+  def fnmsubs(frd: Int, frs1: Int, frs2: Int, frs3: Int, rm: Int = 0): BigInt =
+    (frs3 << 27) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x4b
+  def fnmadds(frd: Int, frs1: Int, frs2: Int, frs3: Int, rm: Int = 0): BigInt =
+    (frs3 << 27) | (frs2 << 20) | (frs1 << 15) | (rm << 12) | (frd << 7) | 0x4f
+  // vset* configuration (RISC-V V encodings).
+  def vsetvli(rd: Int, rs1: Int, vtypei: Int): BigInt =
+    (BigInt(vtypei & 0x7ff) << 20) | (rs1 << 15) | (7 << 12) | (rd << 7) | 0x57
+  def vsetvl(rd: Int, rs1: Int, rs2: Int): BigInt =
+    (BigInt(1) << 31) | (rs2 << 20) | (rs1 << 15) | (7 << 12) | (rd << 7) | 0x57
+  def vsetivli(rd: Int, uimm: Int, vtypei: Int): BigInt =
+    (BigInt(3) << 30) | (BigInt(vtypei & 0x3ff) << 20) | (uimm << 15) |
+      (7 << 12) | (rd << 7) | 0x57
+  // vtype helpers: sew (0=8, 1=16, 2=32), lmul (0=1, 5=1/8, 6=1/4, 7=1/2, 1=2, 2=4, 3=8)
+  def vtype(sew: Int, lmul: Int, vta: Int = 0, vma: Int = 0): Int =
+    (vta << 6) | (vma << 7) | ((sew & 7) << 3) | (lmul & 7)
 }
 
 class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
@@ -42,7 +133,8 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
       import Rv32._
       val retired = scala.collection.mutable.ArrayBuffer.empty[(Long, Int, BigInt)]
       def tick(): Unit = {
-        if (dut.io.retire.valid.peek().litToBoolean) {
+        if (dut.io.retire.valid.peek().litToBoolean &&
+          !dut.io.retire.bits.exception.peek().litToBoolean) {
           val c = dut.io.retire.bits
           retired += ((c.uop.pc.peek().litValue.toLong, c.uop.rd.peek().litValue.toInt, c.data.peek().litValue))
         }
@@ -141,16 +233,16 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
         dut.io.debugRegs(0).expect(0)
       }
 
-      assert(readCsr(0x18) == 512 * 1024)
+      assert(readCsr(0x18) == 256 * 1024)
       assert(readCsr(0x1c) == p.dtcmBytes)
-      writeMemory(0x10000000L, Seq(7, -3, 9, 11).map(x => BigInt(x) & BigInt("ffffffff", 16)))
+      writeMemory(0x100000L, Seq(7, -3, 9, 11).map(x => BigInt(x) & BigInt("ffffffff", 16)))
       // Sum four words, exercising negative branch displacement, loads and captured store data.
       val sum = Seq(addi(1, 0, 0), addi(2, 0, 4), addi(3, 0, 0),
         lw(4, 1, 0), r(3, 0, 3, 4), addi(1, 1, 4), addi(2, 2, -1),
         b(1, 2, 0, -16), sw(3, 0, 64), fence, lw(5, 0, 64), halt)
       run(sum)
       dut.io.debugRegs(3).expect(24); dut.io.debugRegs(5).expect(24)
-      assert(readMemory(0x10000040L) == 24)
+      assert(readMemory(0x100040L) == 24)
       assert(retired.map(_._1).toSeq == Seq(0L, 4L, 8L) ++
         Seq.fill(4)(Seq(12L, 16L, 20L, 24L, 28L)).flatten ++ Seq(32L, 36L, 40L, 44L))
       assert(readCsr(0x114) == 24)
@@ -169,13 +261,13 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugRegs(8).expect(13) // not-taken encoded misaligned target is ignored
 
       // Faulting instructions and younger stores must not change committed state/memory.
-      run(Seq(addi(9, 0, 27), BigInt("02000033", 16), sw(9, 0, 64), halt), 1, 4)
+      run(Seq(addi(9, 0, 27), BigInt("08000033", 16), sw(9, 0, 64), halt), 1, 4)
       dut.io.debugRegs(9).expect(27)
-      assert(readMemory(0x10000040L) == 24)
+      assert(readMemory(0x100040L) == 24)
       run(Seq(lw(0, 0, 2), sw(9, 0, 64), halt), 4, 0)
-      assert(readMemory(0x10000040L) == 24)
+      assert(readMemory(0x100040L) == 24)
       run(Seq(sw(9, 0, 2), halt), 6, 0)
-      assert(readMemory(0x10000000L) == 7)
+      assert(readMemory(0x100000L) == 7)
       run(Seq(lw(0, 0, p.dtcmBytes), halt), 5, 0)
       run(Seq(addi(11, 0, 5), jal(11, 2), halt), 2, 4)
       dut.io.debugRegs(11).expect(5) // no link write on target fault
@@ -189,34 +281,42 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
       // words are illegal and must not create younger writes.
       val illegal = Seq(
         i(3, 20, 0, 1, 0), i(3, 20, 1, 1, 0), i(3, 20, 4, 1, 0), i(3, 20, 5, 1, 0),
-        sb(2, 1, 0), sh(2, 1, 0), ecall, ebreak, BigInt(0),
-        halt | 0x80, halt | (BigInt(1) << 12), BigInt("02000033", 16),
-        BigInt("00008073", 16), BigInt("001000f3", 16), BigInt("00200073", 16))
+        sb(2, 1, 0), sh(2, 1, 0), BigInt(0),
+        halt | 0x80, halt | (BigInt(1) << 12), BigInt("08000033", 16),
+        BigInt("00004073", 16), BigInt("001040f3", 16), BigInt("00204073", 16))
       for (trap <- illegal) {
         run(Seq(addi(24, 0, 37), addi(25, 0, 11), sw(24, 0, 160), trap,
           addi(25, 0, 99), sb(25, 0, 160), halt), 1, 12, Some(trap))
         dut.io.debugRegs(24).expect(37); dut.io.debugRegs(25).expect(11)
-        assert(readMemory(0x100000a0L) == 37)
+        assert(readMemory(0x1000a0L) == 37)
         assert(retired.map(_._1).toSeq == Seq(0L, 4L, 8L))
         // Every fault is acknowledged and followed by a successful draining HALT.
         run(Seq(addi(25, 24, 1), sw(25, 0, 160), halt, sw(24, 0, 160)))
         dut.io.debugRegs(25).expect(38)
-        assert(readMemory(0x100000a0L) == 38)
+        assert(readMemory(0x1000a0L) == 38)
         assert(retired.map(_._1).toSeq == Seq(0L, 4L, 8L))
       }
 
-      // A host-loaded vector program: load sixteen words, add a broadcast scalar,
+      // ECALL/EBREAK are precise host events delivered as distinct fault causes.
+      run(Seq(ebreak, halt), 16, 0, Some(ebreak))
+      run(Seq(ecall, halt), 17, 0, Some(ecall))
+      // Illegal CSR access: unknown addresses and writes to read-only CSRs.
+      run(Seq(addi(24, 0, 1), csrrw(20, 0x000, 24), halt), 18, 4)
+      run(Seq(addi(24, 0, 1), csrrw(20, 0xc20, 24), halt), 18, 4)
+
+      // A host-loaded vector program: load four words, add a broadcast scalar,
       // then store the result to a disjoint DTCM region.
       import VectorEncoding._
-      writeMemory(0x10000000L, (0 until 16).map(i => BigInt(i + 1)))
-      run(Seq(addi(1, 0, 0), instruction(VecOp.vle32, 0, 1, 0),
+      writeMemory(0x100000L, (0 until 4).map(i => BigInt(i + 1)))
+      run(Seq(vsetivli(0, 4, vtype(sew = 2, lmul = 0)), addi(1, 0, 0),
+        instruction(VecOp.vle32, 0, 1, 0),
         addi(2, 0, 5), instruction(VecOp.vadd + 1, 1, 2, 0),
         addi(3, 0, 64), instruction(VecOp.vse32, 1, 3, 0), fence, halt))
-      for (i <- 0 until 16)
-        assert(readMemory(0x10000040L + 4L * i) == BigInt(i + 6))
-      dut.io.debugVRegs(0).expect(packed((0 until 16).map(i => BigInt(i + 1))))
-      dut.io.debugVRegs(1).expect(packed((0 until 16).map(i => BigInt(i + 6))))
-      assert(retired.map(_._1).toSeq == Seq(0L, 4L, 8L, 12L, 16L, 20L, 24L, 28L))
+      for (i <- 0 until 4)
+        assert(readMemory(0x100040L + 4L * i) == BigInt(i + 6))
+      dut.io.debugVRegs(0).expect(packed32((0 until 4).map(i => BigInt(i + 1))))
+      dut.io.debugVRegs(1).expect(packed32((0 until 4).map(i => BigInt(i + 6))))
+      assert(retired.map(_._1).toSeq == Seq(0L, 4L, 8L, 12L, 16L, 20L, 24L, 28L, 32L))
     }
   }
 }

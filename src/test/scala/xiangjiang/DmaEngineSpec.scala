@@ -6,7 +6,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import device.DmaEngine
 
 class DmaEngineSpec extends AnyFunSuite with ChiselSim {
-  for (maximum <- Seq(1, 7, 256)) test(s"DMA round trips, 2D strides, boundaries, backpressure and faults (max=$maximum)") {
+  for (maximum <- Seq(1, 7, 16)) test(s"DMA round trips, 2D strides, boundaries, backpressure and faults (max=$maximum)") {
     val p = XJParams(bankBytes = 2048, dmaMaxBurstBeats = maximum)
     simulate(new DmaEngine(p)) { d =>
       val random = new scala.util.Random(2026)

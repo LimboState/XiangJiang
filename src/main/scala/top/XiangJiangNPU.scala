@@ -15,7 +15,7 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
     val status = Output(new CoreStatus)
     val retire = Output(Valid(new CommitRecord(p)))
     val debugRegs = Output(Vec(32, UInt(32.W)))
-    val debugVRegs = Output(Vec(32, UInt(512.W)))
+    val debugVRegs = Output(Vec(32, UInt(p.vlen.W)))
   })
 
   val core = Module(new ScalarCore(p))

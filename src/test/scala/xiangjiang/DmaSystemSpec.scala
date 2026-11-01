@@ -126,7 +126,7 @@ class DmaSystemSpec extends AnyFunSuite with ChiselSim {
       assert(!commits.contains(24) && transactions == 1 && csr(0x34) == 13)
       injectReadError = false; injectWriteError = true
       run(shape ++ addresses ++ Seq(DmaEncoding(3, 10, 11), halt), 14)
-      assert(csr(0x34) == (16 + 14) && csr(0x3c) == 0)
+      assert(csr(0x34) == (32 + 14) && csr(0x3c) == 0)
       injectWriteError = false
       run(shape ++ addresses ++ Seq(DmaEncoding(2, 10, 11), halt))
       run(shape ++ Seq(addi(10, 0, 2), addi(11, 0, 0), DmaEncoding(2, 10, 11), halt), 12)

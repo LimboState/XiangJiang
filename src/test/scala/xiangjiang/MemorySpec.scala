@@ -8,7 +8,7 @@ import xiangjiang.mem.DataTcm
 
 class MemorySpec extends AnyFunSuite with ChiselSim {
   private val p = XJParams(bankBytes = 256)
-  private val base = BigInt("10000000", 16)
+  private val base = BigInt("100000", 16)
 
   private def until(dut: Module, condition: => Boolean): Unit = {
     var cycles = 0
@@ -425,7 +425,7 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         24 -> p.itcmBytes, 28 -> p.dtcmBytes, 32 -> p.nRob, 36 -> p.nXRes,
         40 -> p.nMemq, 44 -> p.nIssue, 48 -> 1)) read(a, v)
       for (i <- 0 until 32) read(0x100 + i * 4, if (i == 0) 0 else 100 + i)
-      read(0x34, 29); read(0x38, 0x1234); read(0x3c, BigInt("23456789", 16)); read(0x40, 1)
+      read(0x34, 45); read(0x38, 0x1234); read(0x3c, BigInt("23456789", 16)); read(0x40, 1)
       for (a <- Seq(1, 0x44, 0xfc, 0x180)) read(a, 0, error = true)
       for (a <- Seq(1, 4, 0x100, 0x180)) write(a, 1, error = true)
     }
