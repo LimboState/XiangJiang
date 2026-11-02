@@ -32,12 +32,18 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   control.io.dmaStatus := dma.io.status
   io.control <> control.io.axi
   io.memory <> tcm.io.axi
+  // Capture an accepted Start before driving the backend-wide flush network.
+  // Reserve TCM throughout this extra cycle: do not merely delay start while
+  // allowing a new Host transaction to race the first fetch.
+  val startPending = RegNext(control.io.start, false.B)
+  val externallyBusy = core.io.status.busy || startPending
   control.io.status := core.io.status
+  control.io.status.busy := externallyBusy
   control.io.hostIdle := tcm.io.hostIdle
   control.io.debugRegs := core.io.debugRegs
-  core.io.start := control.io.start
+  core.io.start := startPending
   core.io.ack := control.io.ack
-  tcm.io.coreBusy := core.io.status.busy
+  tcm.io.coreBusy := externallyBusy
   tcm.io.fetchReq <> core.io.fetchReq
   core.io.fetchResp := tcm.io.fetchResp
   tcm.io.dataReq <> core.io.dataReq
@@ -45,6 +51,7 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   tcm.io.matrixReq <> core.io.matrixReq
   core.io.matrixResp <> tcm.io.matrixResp
   io.status := core.io.status
+  io.status.busy := externallyBusy
   io.retire := core.io.retire
   io.debugRegs := core.io.debugRegs
   io.debugVRegs := core.io.debugVRegs

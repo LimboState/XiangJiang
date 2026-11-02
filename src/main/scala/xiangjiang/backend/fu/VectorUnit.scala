@@ -13,14 +13,14 @@ import xiangjiang._
   * operations keep their fixed 8-lane 16-bit layout.
   *
   * FP32 operations require SEW=32, which dispatch enforces. The unit visits
-  * one integer element per cycle, or one FP element per five cycles, and
-  * reports a single completion when all elements are merged.
+  * registers lane selection, arithmetic and merge separately. FP add has an
+  * additional unpack register; completion reads only merged registers.
   */
 class VectorUnit(p: XJParams) extends Module {
   val io = IO(new ScalarUnitIO(p))
   private val maxElements = 16
   private val elementBits = log2Ceil(maxElements)
-  private val idle :: running :: complete :: Nil = Enum(3)
+  private val idle :: selectLane :: running :: mergeLane :: finish :: complete :: Nil = Enum(6)
   private val state = RegInit(idle)
   private val uop = Reg(new MicroOp(p))
   private val source1 = Reg(UInt(p.vlen.W))
@@ -33,8 +33,21 @@ class VectorUnit(p: XJParams) extends Module {
   private val accumulated = Reg(UInt(p.vlen.W))
   private val reduction = Reg(UInt(32.W))
   private val completion = Reg(new ExeResult(p))
-  // One lane is held stable while the four arithmetic stages drain.
+  // Hold operands/index stable until the five-stage FP add drains.
   private val laneCycle = RegInit(0.U(3.W))
+  private val a = Reg(UInt(32.W))
+  private val b = Reg(UInt(32.W))
+  private val reductionA = Reg(UInt(32.W))
+  private val reductionB = Reg(UInt(32.W))
+  private val laneValue = Reg(UInt(32.W))
+  private val laneComparison = Reg(Bool())
+  private val laneReduction = Reg(UInt(32.W))
+  private val laneActive = Reg(Bool())
+  private val laneMerge = Reg(Bool())
+  private val laneReduceActive = Reg(Bool())
+  private val laneWriteIndex = Reg(UInt(6.W))
+  private val laneWriteBytes = Reg(UInt(3.W))
+  private val permutationValue = Reg(UInt(32.W))
 
   io.req.ready := state === idle && !io.flush
   io.resp.valid := state === complete && !io.flush
@@ -75,11 +88,11 @@ class VectorUnit(p: XJParams) extends Module {
   private val vlActive = el < uop.vl && (uop.unmasked || maskBit(el))
   private val active = Mux(legacyBf16 || unaryOp, legacyActive, vlActive)
   private val isMerge = vmergeOp && el < uop.vl
-  private val a = Mux(legacyBf16 || unaryOp, bf16Lane(source2, elSafe), elem(source2, elSafe))
+  private val selectedA = Mux(legacyBf16 || unaryOp, bf16Lane(source2, elSafe), elem(source2, elSafe))
   private val bScalar = Mux(legacyBf16, scalar(15, 0),
     Mux(fp32Op && !fp32UnaryCvt && !fp32Reduction && op(0) && op =/= VecOp.vfsqrt32.U,
       fScalar, scalar))
-  private val b = Mux(op(0), bScalar, Mux(legacyBf16 || unaryOp,
+  private val selectedB = Mux(op(0), bScalar, Mux(legacyBf16 || unaryOp,
     bf16Lane(source1, elSafe), elem(source1, elSafe)))
   private val sewBits = Mux(sew === 0.U, 8.U, Mux(sew === 1.U, 16.U, 32.U))
   private val signExt = Mux(sew === 0.U, Cat(Fill(24, a(7)), a(7, 0)),
@@ -89,13 +102,13 @@ class VectorUnit(p: XJParams) extends Module {
   private val shamtBits = Mux(sew === 0.U, b(2, 0), Mux(sew === 1.U, b(3, 0), b(4, 0)))
 
   private val bfAdd = VectorFloat.add(a(15, 0),
-    Cat(b(15) ^ (op === VecOp.vfsub.U || op === (VecOp.vfsub + 1).U), b(14, 0)), pipelined = true)
+    Cat(b(15) ^ (op === VecOp.vfsub.U || op === (VecOp.vfsub + 1).U), b(14, 0)), pipelined = true, splitInput = true)
   private val bfMul = VectorFloat.mul(a(15, 0), b(15, 0), pipelined = true)
   private val fpAdd = VectorFloat.add32(a,
-    Cat(b(31) ^ (op === VecOp.vfsub32.U || op === (VecOp.vfsub32 + 1).U), b(30, 0)), pipelined = true)
+    Cat(b(31) ^ (op === VecOp.vfsub32.U || op === (VecOp.vfsub32 + 1).U), b(30, 0)), pipelined = true, splitInput = true)
   private val fpMul = VectorFloat.mul32(a, b, pipelined = true)
-  private val reductionAdd = VectorFloat.add32(reduction,
-    Mux(fp32Reduction, a, VectorFloat.widen(a(15, 0))), pipelined = true)
+  private val reductionAdd = VectorFloat.add32(reductionA, reductionB,
+    pipelined = true, splitInput = true)
   private val value = WireDefault(0.U(32.W))
   private val comparison = WireDefault(false.B)
   switch(op) {
@@ -145,44 +158,47 @@ class VectorUnit(p: XJParams) extends Module {
   private val distance = Mux(op(0), uop.rs1, scalar)
   private val upIndex = Mux(el >= distance, el - distance, 0.U)
   private val downIndex = Mux(el +& distance <= (maxElements - 1).U, el + distance, 0.U)
+  private val selectedPermutation = WireDefault(0.U(32.W))
+  private val permutationOp = op === VecOp.vslideup.U || op === VecOp.vslideupImm.U ||
+    op === VecOp.vslidedown.U || op === VecOp.vslidedownImm.U || vmergeOp || vgatherOp
+  when(permutationOp) { value := permutationValue }
   when(op === VecOp.vslideup.U || op === VecOp.vslideupImm.U) {
-    value := Mux(el < distance, 0.U, Mux(legacyBf16 || unaryOp,
+    selectedPermutation := Mux(el < distance, 0.U, Mux(legacyBf16 || unaryOp,
       bf16Lane(source2, upIndex), elem(source2, upIndex)))
   }
   when(op === VecOp.vslidedown.U || op === VecOp.vslidedownImm.U) {
     // Elements whose source index reaches or passes vl are tail and keep the
     // old destination value.
-    value := Mux(downIndex < uop.vl, Mux(legacyBf16 || unaryOp,
+    selectedPermutation := Mux(downIndex < uop.vl, Mux(legacyBf16 || unaryOp,
       bf16Lane(source2, downIndex), elem(source2, downIndex)),
       Mux(legacyBf16 || unaryOp, bf16Lane(old, elSafe), elem(old, elSafe)))
   }
   when(vmergeOp) {
-    value := Mux(maskBit(el), Mux(legacyBf16 || unaryOp,
+    selectedPermutation := Mux(maskBit(el), Mux(legacyBf16 || unaryOp,
       bf16Lane(source1, elSafe), elem(source1, elSafe)),
       Mux(legacyBf16 || unaryOp, bf16Lane(source2, elSafe), elem(source2, elSafe)))
   }
   when(vgatherOp) {
     val idx = Mux(elem(source1, el) < maxElements.U, elem(source1, el), 0.U)
-    value := Mux(idx < uop.vl, Mux(legacyBf16 || unaryOp,
+    selectedPermutation := Mux(idx < uop.vl, Mux(legacyBf16 || unaryOp,
       bf16Lane(source2, idx), elem(source2, idx)), 0.U)
   }
 
-  private val nextBytes = Wire(Vec(maxElements * 4, UInt(8.W)))
-  nextBytes := accumulated.asTypeOf(Vec(maxElements * 4, UInt(8.W)))
-  private val writeIndex = Mux(legacyBf16 || unaryOp, el * 2.U, byteOf)
-  private val writeBytesN = Mux(legacyBf16 || unaryOp, 2.U, sewBytes)
-  when(active || isMerge) {
-    for (b <- 0 until 4) {
-      when(writeBytesN > b.U) {
-        nextBytes((writeIndex + b.U)(5, 0)) := value(8 * b + 7, 8 * b)
-      }
+  // Exactly 16 physical bytes, not the former 64-byte temporary. Fixed
+  // destinations avoid a cascade of dynamically indexed byte writes.
+  private val nextBytes = Wire(Vec(p.vlen / 8, UInt(8.W)))
+  nextBytes := accumulated.asTypeOf(Vec(p.vlen / 8, UInt(8.W)))
+  for (dest <- 0 until p.vlen / 8; src <- 0 until 4) {
+    when((laneActive || laneMerge) && laneWriteBytes > src.U &&
+      laneWriteIndex + src.U === dest.U) {
+      nextBytes(dest) := laneValue(8 * src + 7, 8 * src)
     }
   }
   private val comparisonBit = el
   private val nextComparison = Wire(UInt(p.vlen.W))
   private val comparisonMask = (1.U(p.vlen.W) << comparisonBit)(p.vlen - 1, 0)
-  nextComparison := Mux(active,
-    (accumulated & ~comparisonMask) | Mux(comparison, comparisonMask, 0.U), accumulated)
+  nextComparison := Mux(laneActive,
+    (accumulated & ~comparisonMask) | Mux(laneComparison, comparisonMask, 0.U), accumulated)
   private val nextVector = Mux(isComparison || fp32Comparison, nextComparison,
     nextBytes.asUInt)
   private val reducedLegacy = Mux(uop.rs1 === VecOp.uFredSum.U,
@@ -210,24 +226,48 @@ class VectorUnit(p: XJParams) extends Module {
         Mux(io.req.bits.uop.rs1 === VecOp.uFredMax.U, "h0000ff80".U(32.W), 0.U))
       el := 0.U
       laneCycle := 0.U
+      state := selectLane
+    }
+    when(state === selectLane) {
+      a := selectedA
+      b := selectedB
+      reductionA := reduction
+      reductionB := Mux(fp32Reduction, selectedA, VectorFloat.widen(selectedA(15, 0)))
+      permutationValue := selectedPermutation
+      laneActive := active
+      laneMerge := isMerge
+      laneReduceActive := reduceActive
+      laneWriteIndex := Mux(legacyBf16 || unaryOp, el * 2.U, byteOf)
+      laneWriteBytes := Mux(legacyBf16 || unaryOp, 2.U, sewBytes)
+      laneCycle := 0.U
       state := running
     }
-    when(state === running) { laneCycle := laneCycle + 1.U }
-    when(state === running && (!pipelinedLane || laneCycle === 4.U)) {
-      laneCycle := 0.U
+    when(state === running) {
+      laneCycle := laneCycle + 1.U
+      when(!pipelinedLane || laneCycle === 5.U) {
+        laneValue := value
+        laneComparison := comparison
+        laneReduction := nextReduction
+        state := mergeLane
+      }
+    }
+    when(state === mergeLane) {
       accumulated := nextVector
-      reduction := Mux(reduceActive, nextReduction, reduction)
+      when(laneReduceActive) { reduction := laneReduction }
       when(el === (maxElements - 1).U) {
-        completion := 0.U.asTypeOf(new ExeResult(p))
-        completion.tag := uop.tag
-        completion.seq := uop.seq
-        completion.nextPc := uop.pc + 4.U
-        completion.data := Mux(isReduction || fp32Reduction,
-          Mux(reduceActive, nextReduction, reduction).pad(p.vlen), nextVector)
-        state := complete
+        state := finish
       }.otherwise {
         el := el + 1.U
+        state := selectLane
       }
+    }
+    when(state === finish) {
+      completion := 0.U.asTypeOf(new ExeResult(p))
+      completion.tag := uop.tag
+      completion.seq := uop.seq
+      completion.nextPc := uop.pc + 4.U
+      completion.data := Mux(isReduction || fp32Reduction, reduction.pad(p.vlen), accumulated)
+      state := complete
     }
     when(io.resp.fire) { state := idle }
   }

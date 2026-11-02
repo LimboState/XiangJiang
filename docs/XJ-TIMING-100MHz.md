@@ -41,8 +41,8 @@
 | MUL/MULH/MULHSU/MULHU | 3 | 保守单任务，最小间隔 4 拍 |
 | DIV/DIVU/REM/REMU | 34 | 输入 1 + 迭代 32 + 收尾 1，最小间隔 35 拍 |
 | 保留标量浮点 | 6 | 输入 1 + 四级内部流水 + 输出 1，最小间隔 7 拍 |
-| 一般向量整数 | 17 | 输入 1 + 遍历 16 元素；原结构不变 |
-| 向量 FP/归约 | 81 | 输入 1 + 16×5；含 inactive/tail 扫描 |
+| 一般向量整数 | 50 | 输入 1 + 16×(选取 1 + 运算 1 + 合并 1) + 完成 1 |
+| 向量 FP/归约 | 130 | 输入 1 + 16×(选取 1 + 运算 6 + 合并 1) + 完成 1；含 inactive/tail 扫描 |
 | INT8 矩阵 MMUL/MMACC | 22 compute clocks | 不含 prepare、staging、访存、提交 |
 | BF16 矩阵 MMUL/MMACC | 116 compute clocks | 每 5 拍推进，最后两相位用于排空 |
 | BF16 MEW/MTRANS | 320 elementwise clocks | 当前统一 64×5 保守节拍 |
@@ -116,6 +116,29 @@ setup 失败端点 10306 个。最差路径从 MatrixUnit 的 beat 寄存器，�
 `Bf16NarrowSpec` 检查全部 65536 个保留高半字在五个舍入边界的结果，另加 2000
 个随机输入；既有精确有理数参考测试继续运行。矩阵测试增加 beat 反压稳定性、
 准备/待发送状态 flush 及重启检查。
+
+## 第三轮：向量合并、对阶与 Start 控制
+
+根据用户提供的路径分类，向量 accumulated 与 completion.data 各 128 个端点
+WNS -3.220 ns；归约对阶 A/B 为 -2.547/-1.472 ns；Start→flush→完成仲裁→
+ROB→操作数捕获为 -0.791 ns；FP32 加减对阶为 -0.544 ns。
+这些数据用于定位结构，不构成修改后的时序测量。
+
+- 向量元素先锁存到 a/b，重排结果、mask/tail 活动位、字节索引与宽度同拍捕获。
+- 运算结果 laneValue/laneComparison/laneReduction 先寄存，再执行合并。
+  字节合并仅覆盖实际 16 个字节，固定目标字节选择替代原 64-byte 临时数组的动态写。
+- 最后一个元素先合并到 accumulated/reduction；独立 finish 状态只读取这些寄存器，
+  不再将最后元素的计算和合并直接送入 completion.data。
+- 向量 BF16/FP32 加法与归约使用 splitInput 流水：先解包/规格化寄存，再指数比较
+  和 sticky 对阶；五个内部寄存边界。标量和矩阵的原四级配置不变，因此矩阵推进
+  节拍、标量延迟不随本轮变化。归约仍按元素顺序累加，不重排浮点求和。
+- 顶层寄存已经获准的 Start，阻断 Host→后端 flush 组合链。startPending 同时
+  计入对外 Busy、控制寄存器 Busy 和 TCM coreBusy；不能只延迟 Start 而留出 Host
+  访存窗口。Start 增加一拍，Ack 行为不变；不延迟 hostIdle 的合法性判断。
+
+本轮不删除指令、不放宽 STA 约束。代价是向量整数 17→50 拍、FP/归约 81→130 拍；
+这是单元素串行结构的保守分段，不宣称保持原吞吐率。后续可在 STA 通过后优化
+不同元素的阶段重叠，但归约反馈必须保持严格顺序。
 
 ## Vivado 导出与签核
 

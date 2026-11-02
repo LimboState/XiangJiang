@@ -79,7 +79,9 @@ object VectorFloat {
       stage(sign, pipelined), p, pipelined)
   }
 
-  private def addGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false): UInt = {
+  private def addGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false,
+                         splitInput: Boolean = false): UInt = {
+    require(!splitInput || pipelined, "input split requires the arithmetic pipeline")
     val x = new Parts(a, p)
     val y = new Parts(b, p)
     val w = p + 5
@@ -88,15 +90,21 @@ object VectorFloat {
     // Zero's arbitrary decoded exponent must not shift a tiny nonzero operand.
     val ae = Mux(x.isZero, (-512).S(12.W), x.exponent)
     val be = Mux(y.isZero, (-512).S(12.W), y.exponent)
-    val finite = sumMagnitudes(ax, ae, x.sign, bx, be, y.sign, p, pipelined)
-    Mux(delay(x.isNaN || y.isNaN || (x.isInf && y.isInf && x.sign =/= y.sign), 4, pipelined), nan(p),
-      Mux(delay(x.isInf, 4, pipelined), infinity(delay(x.sign, 4, pipelined), p),
-        Mux(delay(y.isInf, 4, pipelined), infinity(delay(y.sign, 4, pipelined), p), finite)))
+    // Vector lane selection is registered by its caller. Optionally separate
+    // unpack/normalization from exponent comparison and sticky alignment too.
+    val finite = sumMagnitudes(stage(ax, splitInput), stage(ae, splitInput), stage(x.sign, splitInput),
+      stage(bx, splitInput), stage(be, splitInput), stage(y.sign, splitInput), p, pipelined)
+    val latency = if (splitInput) 5 else 4
+    Mux(delay(x.isNaN || y.isNaN || (x.isInf && y.isInf && x.sign =/= y.sign), latency, pipelined), nan(p),
+      Mux(delay(x.isInf, latency, pipelined), infinity(delay(x.sign, latency, pipelined), p),
+        Mux(delay(y.isInf, latency, pipelined), infinity(delay(y.sign, latency, pipelined), p), finite)))
   }
 
-  def add(a: UInt, b: UInt, pipelined: Boolean = false): UInt = addGeneric(a(15, 0), b(15, 0), 8, pipelined)
+  def add(a: UInt, b: UInt, pipelined: Boolean = false, splitInput: Boolean = false): UInt =
+    addGeneric(a(15, 0), b(15, 0), 8, pipelined, splitInput)
   def sub(a: UInt, b: UInt): UInt = add(a, Cat(!b(15), b(14, 0)))
-  def add32(a: UInt, b: UInt, pipelined: Boolean = false): UInt = addGeneric(a(31, 0), b(31, 0), 24, pipelined)
+  def add32(a: UInt, b: UInt, pipelined: Boolean = false, splitInput: Boolean = false): UInt =
+    addGeneric(a(31, 0), b(31, 0), 24, pipelined, splitInput)
 
   private def mulGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false): UInt = {
     val x = new Parts(a, p)

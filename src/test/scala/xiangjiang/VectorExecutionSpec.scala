@@ -105,7 +105,7 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
         c.io.mask.poke(0)
         c.io.scalar.poke(0)
         c.io.fScalar.poke(0)
-        val deadline = 100
+        val deadline = 200
         var done = false
         for (_ <- 0 until deadline if !done) {
           done = c.io.resp.valid.peek().litToBoolean
@@ -114,6 +114,15 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
         assert(done, "vector completion timeout")
         c.io.resp.bits.exception.expect(false)
         c.io.resp.bits.data.expect(expected)
+        assert(c.io.resp.bits.data.peek().litValue == expected)
+        for (_ <- 0 until 3) {
+          assert(c.io.resp.valid.peek().litToBoolean)
+          assert(c.io.resp.bits.data.peek().litValue == expected)
+          assert(c.io.resp.bits.tag.slot.peek().litValue == 1)
+          assert(c.io.resp.bits.seq.peek().litValue == 7)
+          assert(c.io.resp.bits.nextPc.peek().litValue == 0x104)
+          c.clock.step()
+        }
         c.io.resp.ready.poke(true)
         c.clock.step()
         c.io.resp.ready.poke(false)
@@ -165,7 +174,7 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
         c.io.valid.poke(true)
         c.clock.step()
         c.io.valid.poke(false)
-        val deadline = 100
+        val deadline = 200
         var done = false
         for (_ <- 0 until deadline if !done) {
           done = c.io.resp.valid.peek().litToBoolean
@@ -234,12 +243,33 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
       val fsum = fAdd(fAdd(fAdd(f32(0), f32(1)), f32(2)), f32(3))
       execute(VecOp.vfredsum32, f32, bb, fsum,
         previous = Seq.fill(4)(BigInt(0)))
+      execute(VecOp.vfredsum32, f32, bb, fAdd(f32(0), f32(2)),
+        mask = 5, unmasked = false)
+      execute(VecOp.vfredsum32, f32, bb, BigInt(0), vl = 0)
+      execute(VecOp.vfredsum32, f32, bb, BigInt(0), mask = 0, unmasked = false)
       // FCVT: FP32 → INT32 (RNE) and back.
       execute(VecOp.vfcvtF2I32, f32, bb, pack(Seq(1, 2, -2, 0).map(BigInt(_))),
         previous = Seq.fill(4)(BigInt(0)))
       execute(VecOp.vfcvtI2F32, Seq(3, -7, 1024, 0).map(BigInt(_)), bb,
         pack(Seq(0x40400000L, 0xc0e00000L, 0x44800000L, 0).map(BigInt(_))),
         previous = Seq.fill(4)(BigInt(0)))
+
+      // Cancel selection, arithmetic, merge, finalization and a stalled result.
+      // Restart immediately so stale arithmetic pipeline contents must not leak.
+      for (age <- Seq(0, 1, 5, 6, 7, 8, 127, 128, 129, 132)) {
+        c.io.op.poke(VecOp.vfadd32); c.io.vsew.poke(2); c.io.vl.poke(4)
+        c.io.v1.poke(pack(f32)); c.io.v2.poke(pack(f32b))
+        c.io.unmasked.poke(true); c.io.valid.poke(true)
+        assert(c.io.ready.peek().litToBoolean)
+        c.clock.step(); c.io.valid.poke(false); c.clock.step(age)
+        c.io.flush.poke(true)
+        assert(!c.io.resp.valid.peek().litToBoolean)
+        assert(!c.io.ready.peek().litToBoolean)
+        c.clock.step(); c.io.flush.poke(false)
+        assert(!c.io.busy.peek().litToBoolean)
+        execute(VecOp.vfadd32, f32b, f32b,
+          pack((0 until 4).map(i => fAdd(f32b(i), f32b(i)))))
+      }
     }
   }
 }

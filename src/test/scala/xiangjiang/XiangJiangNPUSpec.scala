@@ -187,14 +187,28 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
         m.r.ready.poke(true); tick(); m.r.ready.poke(false)
         value
       }
-      def control(value: Int): Unit = {
+      def control(value: Int, probePendingStart: Boolean = false): Unit = {
         // Exercise W-before-AW acceptance on every command.
         c.w.bits.data.poke(value); c.w.valid.poke(true)
         until(c.w.ready.peek().litToBoolean); tick(); c.w.valid.poke(false)
         c.aw.valid.poke(true)
         until(c.aw.ready.peek().litToBoolean); tick(); c.aw.valid.poke(false)
         until(c.b.valid.peek().litToBoolean); c.b.bits.expect(0)
+        if (probePendingStart) {
+          // The Start write is accepted but the core start pulse is registered.
+          // Busy/TCM ownership must already cover this cycle.
+          assert(dut.io.status.busy.peek().litToBoolean)
+          m.ar.bits.addr.poke(0x100000L); m.ar.bits.len.poke(0)
+          m.ar.valid.poke(true)
+          assert(m.ar.ready.peek().litToBoolean)
+        }
         c.b.ready.poke(true); tick(); c.b.ready.poke(false)
+        if (probePendingStart) {
+          m.ar.valid.poke(false)
+          until(m.r.valid.peek().litToBoolean)
+          assert(m.r.bits.resp.peek().litValue == 2, "Host read raced pending Start")
+          m.r.ready.poke(true); tick(); m.r.ready.poke(false)
+        }
       }
       def readCsr(addr: Int): BigInt = {
         c.ar.bits.addr.poke(addr); c.ar.valid.poke(true)
@@ -236,6 +250,10 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
       assert(readCsr(0x18) == 256 * 1024)
       assert(readCsr(0x1c) == p.dtcmBytes)
       writeMemory(0x100000L, Seq(7, -3, 9, 11).map(x => BigInt(x) & BigInt("ffffffff", 16)))
+      writeMemory(0, Seq.fill(8)(addi(1, 0, 0)) :+ halt)
+      control(1, probePendingStart = true)
+      until(dut.io.status.done.peek().litToBoolean)
+      control(2)
       // Sum four words, exercising negative branch displacement, loads and captured store data.
       val sum = Seq(addi(1, 0, 0), addi(2, 0, 4), addi(3, 0, 0),
         lw(4, 1, 0), r(3, 0, 3, 4), addi(1, 1, 4), addi(2, 2, -1),

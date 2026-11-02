@@ -14,7 +14,11 @@ class FloatPipelineHarness extends Module {
     val rm = Input(UInt(3.W))
     val reference = Output(Vec(6, UInt(37.W)))
     val piped = Output(Vec(6, UInt(37.W)))
+    val splitAdd32 = Output(UInt(32.W))
+    val splitAdd16 = Output(UInt(16.W))
   })
+  io.splitAdd32 := VectorFloat.add32(io.a, io.b, pipelined = true, splitInput = true)
+  io.splitAdd16 := VectorFloat.add(io.a, io.b, pipelined = true, splitInput = true)
   for ((out, pipe) <- Seq(io.reference -> false, io.piped -> true)) {
     val add = VectorFloat.f32Add(io.a, io.b, io.rm, pipe)
     val mul = VectorFloat.f32Mul(io.a, io.b, io.rm, pipe)
@@ -36,10 +40,17 @@ class FloatPipelineSpec extends AnyFunSuite with ChiselSim {
       val inputs = (for (a <- edges; b <- edges) yield (BigInt(a), BigInt(b))) ++
         Seq.fill(300)((BigInt(32, random), BigInt(32, random)))
       val queue = scala.collection.mutable.Queue.empty[Seq[BigInt]]
+      val splitQueue = scala.collection.mutable.Queue.empty[(BigInt, BigInt)]
       for (((a, b), i) <- inputs.zipWithIndex) {
         d.io.a.poke(a); d.io.b.poke(b); d.io.rm.poke(i % 5)
         queue.enqueue(d.io.reference.map(_.peek().litValue).toSeq)
+        splitQueue.enqueue((d.io.reference(2).peek().litValue, d.io.reference(4).peek().litValue))
         d.clock.step()
+        if (splitQueue.size >= 5) {
+          val (fp32, bf16) = splitQueue.dequeue()
+          assert(d.io.splitAdd32.peek().litValue == fp32, s"split FP32 sample=$i")
+          assert(d.io.splitAdd16.peek().litValue == bf16, s"split BF16 sample=$i")
+        }
         if (queue.size >= 4) {
           val expected = queue.dequeue()
           for (lane <- 0 until 6)
