@@ -12,6 +12,14 @@ object Generate extends App {
     firtoolOpts = Array("-disable-all-randomization", "-strip-debug-info")
   )
   val configuration = s"""{
+  "implementationProfile": "inference-100mhz-v1",
+  "timingSignoff": "requires-post-route-vivado",
+  "integerMultiplyLatency": 3,
+  "integerDivideLatency": 34,
+  "scalarFloatLatency": 6,
+  "bf16MatrixAdvanceClocks": 5,
+  "removedScalarFloatOps": ["FDIV.S", "FSQRT.S", "FMADD.S", "FMSUB.S", "FNMSUB.S", "FNMADD.S"],
+  "removedVectorOps": [28, 29, 30, 31, 78, 79, 80, 81, 82],
   "itcmBytes": ${p.itcmBytes},
   "dtcmBytes": ${p.dtcmBytes},
   "dtcmBankBytes": ${p.bankBytes},

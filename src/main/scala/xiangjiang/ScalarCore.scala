@@ -283,18 +283,24 @@ class ScalarCore(p: XJParams) extends Module {
   completion(8).valid := systemValid
   completion(8).bits := systemResult
   when(completion(8).fire) { systemValid := false.B }
-  val have = Wire(Vec(10, Bool()))
-  val pick = Wire(Vec(10, UInt(4.W)))
-  have(0) := false.B
-  pick(0) := 0.U
-  for (i <- 0 until 9) {
-    val take = completion(i).valid && (!have(i) || completion(i).bits.seq < completion(pick(i)).bits.seq)
-    have(i + 1) := have(i) || completion(i).valid
-    pick(i + 1) := Mux(take, i.U, pick(i))
-    completion(i).ready := have(9) && pick(9) === i.U
+  // Balanced oldest-first tournament: carry the candidate sequence with its
+  // index, rather than cascading nine dynamically indexed 9:1 multiplexers.
+  def oldestWinner(xs: Seq[(Bool, UInt, UInt)]): (Bool, UInt, UInt) = {
+    if (xs.size == 1) xs.head
+    else {
+      val (lv, li, ls) = oldestWinner(xs.take(xs.size / 2))
+      val (rv, ri, rs) = oldestWinner(xs.drop(xs.size / 2))
+      val right = rv && (!lv || rs < ls)
+      (lv || rv, Mux(right, ri, li), Mux(right, rs, ls))
+    }
   }
-  rob.io.wb.valid := have(9)
-  rob.io.wb.bits := completion(pick(9)).bits
+  val (haveCompletion, completionIndex, _) = oldestWinner((0 until 9).map(i =>
+    (completion(i).valid, i.U(4.W), completion(i).bits.seq)))
+  for (i <- 0 until 9) {
+    completion(i).ready := haveCompletion && completionIndex === i.U
+  }
+  rob.io.wb.valid := haveCompletion
+  rob.io.wb.bits := completion(completionIndex).bits
   val broadcast = Wire(Valid(new ExeResult(p)))
   broadcast.valid := rob.io.wbAccepted
   broadcast.bits := rob.io.wb.bits

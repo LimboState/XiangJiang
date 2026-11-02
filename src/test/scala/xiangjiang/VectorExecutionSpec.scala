@@ -224,17 +224,9 @@ class VectorExecutionSpec extends AnyFunSuite with ChiselSim {
         BigInt(java.lang.Float.floatToRawIntBits(
           java.lang.Float.intBitsToFloat(a.toInt) * java.lang.Float.intBitsToFloat(b.toInt)) & wordMask.toLong)
       execute(VecOp.vfmul32, f32, f32b, pack((0 until 4).map(i => fMul(f32(i), f32b(i)))))
-      // vfsqrt32: unary on vs2.
-      def fSqrt(a: BigInt): BigInt =
-        BigInt(java.lang.Float.floatToRawIntBits(
-          Math.sqrt(java.lang.Float.intBitsToFloat(a.toInt)).toFloat) & wordMask.toLong)
-      execute(VecOp.vfsqrt32, Seq(0x40000000L, 0x40800000L, 0x3f800000L, 0x00000000L).map(BigInt(_)),
-        bb, pack(Seq(
-          fSqrt(0x40000000L), fSqrt(0x40800000L), fSqrt(0x3f800000L), fSqrt(0))),
-        previous = Seq.fill(4)(BigInt(0)))
-      // vfmacc32: a*b + old.
-      execute(VecOp.vfmacc32, f32, f32b, pack((0 until 4).map(i =>
-        fAdd(fMul(f32(i), f32b(i)), old(i)))))
+      // Removed fused ops lower to explicit multiply/add (two roundings).
+      val products = (0 until 4).map(i => fMul(f32(i), f32b(i)))
+      execute(VecOp.vfadd32, products, old, pack((0 until 4).map(i => fAdd(products(i), old(i)))))
       // Comparisons produce mask bits (rest of the register preserved).
       execute(VecOp.vfeq32, f32, f32, pack(old) | 0xf,
         mask = 0xf, unmasked = false)

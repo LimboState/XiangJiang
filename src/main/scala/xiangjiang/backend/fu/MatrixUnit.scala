@@ -7,8 +7,9 @@ import xiangjiang._
 /** One output-stationary processing element.  A moves east, B moves
   * south, and this PE retains one FP32/INT32 output.  During a matrix product
   * it accepts at most one pair and performs exactly one multiply-accumulate
-  * per cycle. BF16 MACs have two stages: an RNE BF16 product register, then
-  * exact widening and FP32 accumulation. INT8 MACs remain single-cycle.
+  * advance. BF16 advances must be spaced by at least five clocks: a pipelined
+  * RNE BF16 product is widened into a pipelined, sequential FP32 accumulator.
+  * INT8 MACs remain single-cycle.
   * Valid bits delimit the wavefront and make back-to-back products independent.
   */
 class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
@@ -52,21 +53,23 @@ class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
   }
 
   if (bf16) {
-    val product = Reg(UInt(16.W))
-    val productValid = RegInit(false.B)
     val cancel = io.clearPipe || io.clearAcc || io.loadAccValid
     val accept = io.advance && io.aInValid && io.bInValid && !cancel
-    // Advance gates input acceptance, not retirement: the last product must
-    // drain even after A/B propagation stops. Bubbles must never replay a MAC.
-    productValid := accept
-    when(accept) { product := VectorFloat.mul(io.aIn, io.bIn) }
-
+    // Five-cycle rounded product followed by five-cycle FP32 accumulation.
+    // The array advances every five clocks, respecting the feedback latency
+    // without changing sequential summation or BF16 intermediate rounding.
+    val valid = RegInit(VecInit(Seq.fill(9)(false.B)))
+    valid(0) := accept
+    for (i <- 1 until 9) { valid(i) := valid(i - 1) }
+    when(cancel) { valid.foreach(_ := false.B) }
+    val product = RegNext(VectorFloat.mul(io.aIn, io.bIn, pipelined = true))
+    val sum = VectorFloat.add32(accumulator, VectorFloat.widen(product), pipelined = true)
     when(io.loadAccValid) {
       accumulator := io.loadAccData
     }.elsewhen(io.clearAcc) {
       accumulator := 0.U
-    }.elsewhen(productValid && !io.clearPipe && !reset.asBool) {
-      accumulator := VectorFloat.add32(accumulator, VectorFloat.widen(product))
+    }.elsewhen(valid(8) && !cancel && !reset.asBool) {
+      accumulator := sum
     }
   } else {
     when(io.loadAccValid) {
@@ -105,9 +108,10 @@ class MatrixArrayIO extends Bundle {
   *
   * Row i receives A(i,k) at cycle i+k and column j receives B(k,j) at cycle
   * j+k.  Registered east/south links align equal k values at PE(i,j) in cycle
-  * i+j+k.  Consequently an 8x8 product takes 3*8-2 = 22 wavefront cycles;
-  * all 64 PEs work concurrently and each PE accepts one MAC per active cycle.
-  * BF16 adds one drain cycle for the registered product (23 compute cycles).
+  * i+j+k. INT8 takes 3*8-2 = 22 compute clocks. BF16 spaces wavefront
+  * advances by five clocks to preserve the accumulator recurrence; phase 21
+  * accepts the last pair, and phase 23 completes after draining (116 clocks).
+  * All 64 PEs operate concurrently.
   *
   * MMUL zeroes the working accumulator; MMACC seeds the accumulator from the
   * committed MASF ACC before the wavefront starts.
@@ -119,6 +123,8 @@ class MatrixArray(bf16: Boolean) extends Module {
   private val state = RegInit(idle)
   private val op = Reg(MatOp())
   private val phase = RegInit(0.U(6.W))
+  private val subcycle = RegInit(0.U(3.W))
+  private val advance = if (bf16) subcycle === 0.U else true.B
   private val aBuf = Reg(Vec(64, UInt(elementBits.W)))
   private val bBuf = Reg(Vec(64, UInt(elementBits.W)))
   private val pes = Seq.tabulate(8, 8) { (_, _) =>
@@ -135,7 +141,7 @@ class MatrixArray(bf16: Boolean) extends Module {
   })
 
   for (pe <- pes.flatten) {
-    pe.io.advance := state === computing
+    pe.io.advance := state === computing && advance
     pe.io.clearPipe := io.flush || state === prepare
     pe.io.clearAcc := state === prepare && op === MatOp.mmul
     pe.io.loadAccValid := false.B
@@ -229,8 +235,9 @@ class MatrixArray(bf16: Boolean) extends Module {
   val elementResult = WireDefault(0.U(32.W))
   if (bf16) {
     elementResult := VectorFloat.widen(aBuf(Cat(phase(2, 0), phase(5, 3))))
+    val product = VectorFloat.mul(aBuf(phase), bBuf(phase), pipelined = true)
     when(op === MatOp.mew) {
-      elementResult := VectorFloat.widen(VectorFloat.mul(aBuf(phase), bBuf(phase)))
+      elementResult := VectorFloat.widen(product)
     }
   } else {
     elementResult := aBuf(Cat(phase(2, 0), phase(5, 3))).asSInt.pad(32).asUInt
@@ -239,7 +246,7 @@ class MatrixArray(bf16: Boolean) extends Module {
     }
   }
   for ((pe, e) <- pes.flatten.zipWithIndex) {
-    when(state === elementwise && phase === e.U) {
+    when(state === elementwise && phase === e.U && (if (bf16) subcycle === 4.U else true.B)) {
       pe.io.loadAccValid := true.B
       pe.io.loadAccData := elementResult
     }
@@ -261,26 +268,31 @@ class MatrixArray(bf16: Boolean) extends Module {
   when(io.flush) {
     state := idle
     phase := 0.U
+    subcycle := 0.U
   }.otherwise {
+    when(state === computing || state === elementwise) {
+      subcycle := Mux(subcycle === 4.U, 0.U, subcycle + 1.U)
+    }
     when(io.start.fire) {
       op := io.start.bits.op
       phase := 0.U
+      subcycle := 0.U
       state := prepare
     }
     when(state === prepare) {
       phase := 0.U
       state := Mux(op === MatOp.mmul || op === MatOp.mmacc, computing, elementwise)
     }
-    when(state === computing) {
-      // Last pair reaches PE(7,7) at phase 21. BF16 retires that registered
-      // product at phase 22 before reporting completion.
-      when(phase === (if (bf16) 22 else 21).U) {
+    when(state === computing && advance) {
+      // Last pair is accepted at phase 21; two five-clock drain slots cover
+      // product and accumulator pipelines. INT8 retains its original cadence.
+      when(phase === (if (bf16) 23 else 21).U) {
         state := complete
       }.otherwise {
         phase := phase + 1.U
       }
     }
-    when(state === elementwise) {
+    when(state === elementwise && (if (bf16) subcycle === 4.U else true.B)) {
       when(phase === 63.U) {
         state := complete
       }.otherwise {

@@ -6,112 +6,54 @@ import org.scalatest.funsuite.AnyFunSuite
 import xiangjiang.backend.fu.SystolicPE
 
 class SystolicPESpec extends AnyFunSuite with ChiselSim {
-  test("BF16 PE rounds products before two-stage FP32 accumulation and drains exactly once") {
-    simulate(new SystolicPE(16, bf16 = true)) { dut =>
-      dut.io.aIn.poke(0)
-      dut.io.bIn.poke(0)
-      dut.io.aInValid.poke(false)
-      dut.io.bInValid.poke(false)
-      dut.io.advance.poke(false)
-      dut.io.clearPipe.poke(false)
-      dut.io.clearAcc.poke(true)
-      dut.io.loadAccValid.poke(false)
-      dut.io.loadAccData.poke(0)
-      dut.clock.step()
-      dut.io.clearAcc.poke(false)
-
-      def expectAcc(bits: Long): Unit = dut.io.acc.expect(BigInt(bits))
+  test("pipelined BF16 PE preserves sequential rounding at five-clock cadence and cancels in-flight work") {
+    simulate(new SystolicPE(16, bf16 = true)) { d =>
+      d.io.aIn.poke(0); d.io.bIn.poke(0)
+      d.io.aInValid.poke(false); d.io.bInValid.poke(false)
+      d.io.advance.poke(false); d.io.clearPipe.poke(false)
+      d.io.clearAcc.poke(true); d.io.loadAccValid.poke(false); d.io.loadAccData.poke(0)
+      d.clock.step(); d.io.clearAcc.poke(false)
+      def bubble(n: Int): Unit = {
+        d.io.advance.poke(false); d.io.aInValid.poke(false); d.io.bInValid.poke(false)
+        d.clock.step(n)
+      }
       def pair(a: Int, b: Int): Unit = {
-        dut.io.advance.poke(true)
-        dut.io.aInValid.poke(true)
-        dut.io.bInValid.poke(true)
-        dut.io.aIn.poke(a)
-        dut.io.bIn.poke(b)
-        dut.clock.step()
+        d.io.advance.poke(true); d.io.aInValid.poke(true); d.io.bInValid.poke(true)
+        d.io.aIn.poke(a); d.io.bIn.poke(b); d.clock.step()
       }
-      def drain(): Unit = {
-        dut.io.advance.poke(false)
-        dut.io.aInValid.poke(false)
-        dut.io.bInValid.poke(false)
-        dut.clock.step()
+      def load(x: Long): Unit = {
+        d.io.advance.poke(false); d.io.loadAccValid.poke(true); d.io.loadAccData.poke(BigInt(x))
+        d.clock.step(); d.io.loadAccValid.poke(false)
       }
-      def load(bits: Long): Unit = {
-        dut.io.loadAccValid.poke(true)
-        dut.io.loadAccData.poke(BigInt(bits))
-        dut.clock.step()
-        dut.io.loadAccValid.poke(false)
+      def mac(a: Int, b: Int, expected: Long): Unit = {
+        pair(a, b); bubble(9); d.io.acc.expect(BigInt(expected))
+        bubble(3); d.io.acc.expect(BigInt(expected))
       }
-
-      // (1 + 1/128)^2 = 1 + 1/64 + 1/16384. BF16 product
-      // rounds to 0x3f82, not the old FP32 product 0x3f820200.
       pair(0x3f81, 0x3f81)
-      expectAcc(0)
-      dut.io.aOut.expect(0x3f81)
-      dut.io.aOutValid.expect(true)
-      pair(0x3f80, 0x3f80)
-      expectAcc(0x3f820000L)
-      drain()
-      expectAcc(0x40010000L)
-      dut.clock.step(3)
-      expectAcc(0x40010000L) // no repeated accumulation on idle cycles
-
-      // Accumulator retains FP32 precision, rather than rounding to BF16.
-      load(0x3f800000L)
-      pair(0x3580, 0x3f80) // 2^-20 * 1
-      expectAcc(0x3f800000L)
-      drain()
-      expectAcc(0x3f800008L)
-
-      // Cancellation distinguishes product rounding even after a BF16 store:
-      // rounded product + (-rounded product) is exactly zero.
-      load(0xbf820000L)
-      pair(0x3f81, 0x3f81)
-      drain()
-      expectAcc(0)
-
-      // An invalid operand inserts a bubble, never a stale product.
-      pair(0x3f80, 0x3f80)
-      dut.io.bInValid.poke(false)
-      dut.clock.step()
-      expectAcc(0x3f800000L)
-      drain()
-      expectAcc(0x3f800000L)
-
-      // Flush cancels an accepted-but-not-accumulated product and A/B valids.
+      d.io.aOut.expect(0x3f81); d.io.aOutValid.expect(true)
+      d.io.acc.expect(0)
+      bubble(4)
+      pair(0x3f80, 0x3f80) // exactly five clocks after the first
+      bubble(4); d.io.acc.expect(0x3f820000L)
+      bubble(5); d.io.acc.expect(0x40010000L)
+      bubble(10); d.io.acc.expect(0x40010000L)
+      load(0x3f800000L); mac(0x3580, 0x3f80, 0x3f800008L)
+      load(0xbf820000L); mac(0x3f81, 0x3f81, 0)
+      for (age <- Seq(0, 3, 5, 8)) {
+        load(0x3f800000L)
+        pair(0x4000, 0x4000); bubble(age)
+        d.io.clearPipe.poke(true); d.clock.step(); d.io.clearPipe.poke(false)
+        d.io.aOutValid.expect(false); d.io.bOutValid.expect(false)
+        bubble(12); d.io.acc.expect(0x3f800000L)
+        mac(0x4000, 0x3f80, 0x40400000L)
+      }
+      pair(0x4000, 0x4000); load(0x40a00000L); bubble(12); d.io.acc.expect(0x40a00000L)
       pair(0x4000, 0x4000)
-      dut.io.clearPipe.poke(true)
-      dut.clock.step()
-      dut.io.aOutValid.expect(false)
-      dut.io.bOutValid.expect(false)
-      dut.io.clearPipe.poke(false)
-      drain()
-      expectAcc(0x3f800000L)
-      pair(0x4000, 0x3f80)
-      drain()
-      expectAcc(0x40400000L)
-
-      // ACC load/clear override pending MACs and invalidate the product stage.
-      pair(0x4000, 0x4000)
-      load(0x40a00000L)
-      drain()
-      expectAcc(0x40a00000L)
-      pair(0x4000, 0x4000)
-      dut.io.clearAcc.poke(true)
-      dut.clock.step()
-      dut.io.clearAcc.poke(false)
-      drain()
-      expectAcc(0)
-
-      // Product underflow/overflow now occurs at BF16 precision/range.
-      pair(0x0001, 0x3f00) // smallest BF16 subnormal * 0.5: tie to zero
-      drain()
-      expectAcc(0)
-      pair(0x7f7f, 0x4000) // max finite BF16 * 2 -> infinity
-      drain()
-      expectAcc(0x7f800000L)
-      pair(0x7f80, 0x0000) // infinity * zero -> canonical NaN
-      drain()
-      expectAcc(0x7fc00000L)
+      d.io.clearAcc.poke(true); d.clock.step(); d.io.clearAcc.poke(false)
+      bubble(12); d.io.acc.expect(0)
+      mac(0x0001, 0x3f00, 0)
+      mac(0x7f7f, 0x4000, 0x7f800000L)
+      mac(0x7f80, 0x0000, 0x7fc00000L)
     }
   }
 }

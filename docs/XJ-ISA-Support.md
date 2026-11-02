@@ -84,20 +84,14 @@
 | F·访存 | `FSW` | `fs2,off(xs1)` | F 位模式→DTCM | op=0x27，f3=0x2 | 已接入 MemQ；4 B 对齐，Head 授权 |
 | F·算术 | `FADD.S` | `fd,fs1,fs2,rm` | FP32 加法 | op=0x53，f7=0x00，f3=rm | 部分；定向溢出与消去零符号待修正 |
 | F·算术 | `FSUB.S` | `fd,fs1,fs2,rm` | FP32 减法 | op=0x53，f7=0x04，f3=rm | 部分；定向溢出与消去零符号待修正 |
-| F·算术 | `FMUL.S` | `fd,fs1,fs2,rm` | FP32 乘法 | op=0x53，f7=0x08，f3=rm | 部分；Inf×0 结果选择、定向溢出待修正 |
-| F·融合运算 | `FMADD.S` | `fd,fs1,fs2,fs3,rm` | fs1×fs2+fs3，单次舍入 | op=0x43，fmt=0，f3=rm | 部分；fmt 未校验、特殊值与定向溢出待修正 |
-| F·融合运算 | `FMSUB.S` | `fd,fs1,fs2,fs3,rm` | fs1×fs2−fs3，单次舍入 | op=0x47，fmt=0，f3=rm | 部分；fmt 未校验、特殊值与定向溢出待修正 |
-| F·融合运算 | `FNMSUB.S` | `fd,fs1,fs2,fs3,rm` | −fs1×fs2+fs3 | op=0x4B，fmt=0，f3=rm | 部分；当前先舍入再取负，定向舍入有偏差；fmt 未校验 |
-| F·融合运算 | `FNMADD.S` | `fd,fs1,fs2,fs3,rm` | −fs1×fs2−fs3 | op=0x4F，fmt=0，f3=rm | 部分；当前先舍入再取负，定向舍入有偏差；fmt 未校验 |
-| F·除法 | `FDIV.S` | `fd,fs1,fs2,rm` | FP32 除法 | op=0x53，f7=0x0C，f3=rm | 部分；定向溢出与 flags 边界待完善 |
-| F·开方 | `FSQRT.S` | `fd,fs1,rm` | FP32 平方根 | op=0x53，f7=0x2C，rs2=0，f3=rm | 部分；−Inf 结果选择待修正 |
+| F·算术 | `FMUL.S` | `fd,fs1,fs2,rm` | FP32 乘法 | op=0x53，f7=0x08，f3=rm | 部分；Inf×0 已修正，定向溢出待修正 |
 | F·比较 | `FEQ.S` | `xd,fs1,fs2` | 相等→1，否则 0 | op=0x53，f7=0x50，f3=0x2 | 已接入；sNaN 置 NV |
 | F·比较 | `FLT.S` | `xd,fs1,fs2` | 小于→1，否则 0 | op=0x53，f7=0x50，f3=0x1 | 部分；qNaN 未按标准置 NV |
 | F·比较 | `FLE.S` | `xd,fs1,fs2` | 小于等于→1，否则 0 | op=0x53，f7=0x50，f3=0x0 | 部分；qNaN 未按标准置 NV |
 | F·转换 | `FCVT.W.S` | `xd,fs1,rm` | FP32→有符号 INT32 | op=0x53，f7=0x60，rs2=0，f3=rm | 部分；无效/NX/边界需修正 |
 | F·转换 | `FCVT.WU.S` | `xd,fs1,rm` | FP32→无符号 UINT32 | op=0x53，f7=0x60，rs2=1，f3=rm | 部分；错误使用 2^31 无符号上界 |
-| F·转换 | `FCVT.S.W` | `fd,xs1,rm` | 有符号 INT32→FP32 | op=0x53，f7=0x68，rs2=0，f3=rm | 部分；FU 当前误读 fsrc1 而非 src1，不能依赖目标转换结果 |
-| F·转换 | `FCVT.S.WU` | `fd,xs1,rm` | 无符号 UINT32→FP32 | op=0x53，f7=0x68，rs2=1，f3=rm | 部分；FU 当前误读 fsrc1 而非 src1，不能依赖目标转换结果 |
+| F·转换 | `FCVT.S.W` | `fd,xs1,rm` | 有符号 INT32→FP32 | op=0x53，f7=0x68，rs2=0，f3=rm | 已接入；使用 X 源，支持所选舍入模式 |
+| F·转换 | `FCVT.S.WU` | `fd,xs1,rm` | 无符号 UINT32→FP32 | op=0x53，f7=0x68，rs2=1，f3=rm | 已接入；使用 X 源，支持所选舍入模式 |
 | F·搬运 | `FMV.X.W` | `xd,fs1` | F→X 原始位模式 | op=0x53，f7=0x70，rs2=0，f3=0 | 已接入；译码漏 f3=0 限制，FCLASS.S 会被误接收 |
 | F·搬运 | `FMV.W.X` | `fd,xs1` | X→F 原始位模式 | op=0x53，f7=0x78，rs2=0，f3=0 | 已接入；译码漏 f3=0 限制 |
 | Vector·配置 | `VSETVLI` | `xd,xs1,vtypei` | 设置 vl/vtype，xd 返回 vl | op=0x57，f3=0x7，bit31=0；vtypei=inst[30:20] | 部分；提交清 vstart；xs1=x0 的标准 AVL 特例未实现 |
@@ -125,13 +119,15 @@
 | 自定义 Vector·访存 | `VSE32` | `vd,off5(xs1)[,vm]` | vd 连续写 DTCM | op=0x2F，f3=0x0，b25=1；VecOp=65 | 已接入；SEW=32，MemQ Head+ROB Head 授权 |
 | 自定义 Vector·FP32 | `VFADD32.vv` | `vd,vs2,vs1[,vm]` | FP32 加法 | op=0x57，f3=0x1，b25=1；VecOp=72 | 部分；要求 SEW=32，缺 frm/fflags |
 | 自定义 Vector·FP32 | `VFADD32.vf` | `vd,vs2,fs1[,vm]` | FP32 加 F 标量 | op=0x2F，f3=0x1，b25=1；VecOp=73 | 部分；要求 SEW=32，缺 frm/fflags |
-| 自定义 Vector·FP32 | `VFMACC32.vv` | `vd,vs2,vs1[,vm]` | vd_old+vs2×vs1 | op=0x57，f3=0x2，b25=1；VecOp=80 | 部分；要求 SEW=32，缺 frm/fflags |
-| 自定义 Vector·FP32 | `VFMACC32.vf` | `vd,vs2,fs1[,vm]` | vd_old+vs2×fs1 | op=0x2F，f3=0x2，b25=1；VecOp=81 | 部分；要求 SEW=32，缺 frm/fflags |
+| 自定义 Vector·FP32 | `VFSUB32.vv` | `vd,vs2,vs1[,vm]` | FP32 减法 | op=0x7B，f3=4，b25=0；VecOp=74 | 部分；SEW=32，固定 RNE，缺 frm/fflags |
+| 自定义 Vector·FP32 | `VFSUB32.vf` | `vd,vs2,fs1[,vm]` | FP32 减 F 标量 | op=0x7B，f3=4，b25=1；VecOp=75 | 部分；SEW=32，固定 RNE，缺 frm/fflags |
+| 自定义 Vector·FP32 | `VFMUL32.vv` | `vd,vs2,vs1[,vm]` | FP32 乘法 | op=0x7B，f3=5，b25=0；VecOp=76 | 部分；SEW=32，固定 RNE，缺 frm/fflags |
+| 自定义 Vector·FP32 | `VFMUL32.vf` | `vd,vs2,fs1[,vm]` | FP32 乘 F 标量 | op=0x7B，f3=5，b25=1；VecOp=77 | 部分；SEW=32，固定 RNE，缺 frm/fflags |
 | 自定义 Vector·FP32 比较 | `VFEQ32.vv` | `vd,vs2,vs1[,vm]` | FP32 相等，写 mask 位 | op=0x57，f3=0x3，b25=1；VecOp=88 | 部分；要求 SEW=32，缺 fflags |
 | 自定义 Vector·FP32 比较 | `VFEQ32.vf` | `vd,vs2,fs1[,vm]` | FP32 等于 F 标量，写 mask 位 | op=0x2F，f3=0x3，b25=1；VecOp=89 | 部分；要求 SEW=32，缺 fflags |
 | 自定义 Vector·转换 | `VFCVT.I2F32` | `vd,vs2[,vm]` | INT32→FP32 | op=0x57，f3=0x4，b25=1；VecOp=96 | 部分；要求 SEW=32，缺 frm/fflags |
 | 自定义 Vector·转换 | `VFCVT.U2F32` | `vd,vs2[,vm]` | UINT32→FP32 | op=0x2F，f3=0x4，b25=1；VecOp=97 | 部分；要求 SEW=32，缺 frm/fflags |
-| 自定义 Vector·归约 | `VFREDSUM32` | `xd,vs2[,vm]` | FP32 归约求和，返回 X 位模式 | op=0x2B，f3=0x4，b25=1；VecOp=98 | 部分；初值/末尾 inactive 元素合并需修正，缺 frm/fflags |
+| 自定义 Vector·归约 | `VFREDSUM32` | `xd,vs2[,vm]` | FP32 归约求和，返回 X 位模式 | op=0x2B，f3=0x4，b25=1；VecOp=98 | 部分；零初值、末尾 inactive 保留累加值，缺 frm/fflags |
 | Xxjmatrix·配置 | `MSETMODE` | `u,mode` | OS=0，WS=1 | op=0x2B，f3=u，f7=0；rs1=rd=0，inst[24:21]=0，inst[20]=mode | 部分；MU0 WS 拒绝，INT8 WS 只记录模式、未改变物理路由 |
 | Xxjmatrix·装载 | `MLOAD.A` | `u,xs1` | DTCM tile→A staging→MASF | op=0x2B，f3=u，f7=0x04，rs2=rd=0 | 已接入；tile 至少 64 B 对齐，Head 提交发布 |
 | Xxjmatrix·装载 | `MLOAD.B` | `u,xs1` | DTCM tile→B staging→MASF | op=0x2B，f3=u，f7=0x05，rs2=rd=0 | 已接入；tile 至少 64 B 对齐，Head 提交发布 |
@@ -159,7 +155,7 @@
 2. **标量浮点**：rm=0/1/2/3/4 分别为 RNE/RTZ/RDN/RUP/RMM，rm=7 使用 frm 快照，
    rm=5/6 在带 rm 的指令中非法。候选 `fflags={NV,DZ,OF,UF,NX}` 提交时合并，不自动 trap。
    当前溢出统一选择 Infinity，特殊值及定向舍入仍有表列偏差；不能据有 rm/flags 通路
-   就声明完整 IEEE/RISC-V 数值合规。R4 的 fmt=inst[26:25]；表内 fmt=0 是标准单精度编码要求。
+   就声明完整 IEEE/RISC-V 数值合规。FDIV.S、FSQRT.S 及四种 R4 融合操作已移除，旧编码非法。
 
 3. **向量配置**：`VLMAX=LMUL×128/SEW`。当前有有效 VLMAX 表项的组合为：
    SEW=8 的 LMUL=1、1/2、1/4；SEW=16 的 LMUL=1、1/2；SEW=32 的 LMUL=1。
@@ -172,13 +168,14 @@
    对 op=0x2B 为 `2+(f3&3)` 且要求 f3≥4。0x57/f3=7 留给 vset*。
    inst[31:27]=vm，inst[26]=unmasked；inst[24:20]=vs2（访存时为 off5），
    inst[19:15]=vs1/xs1/fs1，inst[11:7]=vd/xd。group 与 f3 不独立，因此内部操作定义
-   并不全可达。本表只列入 29 个可达 VecOp；VSUB、VMUL、VAND、VMERGE、VLE8/16、
-   VSE8/16、VFDIV32、VFSQRT32 等仅有内部路径的操作不列为可执行指令。
+   并不全可达。新增 op=0x7B/f3=4、5 专用于 FP32 减法、乘法，b25=0/1 分别为 vv/vf；
+   这些编码不使用旧 group 公式，不与矩阵 funct3≤3 冲突。整数 VSUB、VMUL、VAND、
+   VMERGE、VLE8/16、VSE8/16 等仍只有内部路径；VFDIV32、VFSQRT32 和浮点融合路径已移除。
 
 5. **向量执行**：一般整数/FP32 路径保留 tail/mask 旧值；遗留 BF16 使用固定 8×16-bit，
    不按 vl 控制活动元素。当前 legacyBf16 范围误覆盖整数比较 36–45；SEW=8/16 取数
    也未统一截断到元素宽度。FP32 路径不消费 frm、不更新 fflags；归约初值/最终活动元素
-   合并仍需修正。可选 mask 寄存器不是标准 RVV 固定 v0 协议。
+   合并已修正。可选 mask 寄存器不是标准 RVV 固定 v0 协议。
 
 6. **矩阵**：均为 8×8，MU0 A/B 与外部 ACC 为 BF16（每 tile 128 B），内部 ACC 为 FP32；
    MU1/2 A/B 为 Signed INT8（64 B），ACC 为 INT32（256 B）。tile 为 row-major，至少
@@ -195,4 +192,5 @@
    [AXI/DMA 规范](XJ-AXI-DMA.md)。CSR 未知地址或写只读项报告本地 cause=18。
    Host Start/Ack、可选 Halt/Resume/Step 与 IRQ 不属于本表机器指令；HALT 指令不等于 Host HALT_REQ。
 
-本次仅整理文档，不修改 RTL 或测试；支持状态来自源码静态核对，不是新增仿真或标准兼容认证。
+100 MHz RTL 变更、周期与软件迁移见 [XJ-TIMING-100MHz.md](XJ-TIMING-100MHz.md)。
+功能仿真不代表 FPGA 时序签核，也不是完整 ISA 合规认证。

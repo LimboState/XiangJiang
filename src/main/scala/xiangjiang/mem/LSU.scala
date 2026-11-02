@@ -96,6 +96,9 @@ class LSU(p: XJParams) extends Module {
       val awakened = captureWakeup(entries(i))
       entries(i).src1 := awakened.src1
       entries(i).src2 := awakened.src2
+      // Multi-cycle FP producers can finish after FSW has entered MemQ.
+      entries(i).fsrc2 := awakened.fsrc2
+      entries(i).fsrc3 := awakened.fsrc3
       entries(i).vold := awakened.vold
       entries(i).vmask := awakened.vmask
     }

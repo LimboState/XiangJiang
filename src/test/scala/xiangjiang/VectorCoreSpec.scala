@@ -12,11 +12,13 @@ object VectorEncoding {
   def instruction(id: Int, rd: Int, rs1: Int, rs2: Int,
                   mask: Option[Int] = None): BigInt = {
     require(id >= 0 && id < 128)
+    val basicFp = id >= VecOp.vfsub32 && id <= VecOp.vfmul32s
     val idx = id & 7
     val f3 = (id >> 3) & 7
-    val bit25 = (id >> 6) & 1
-    val opcode = if (idx == 0) 0x57 else if (idx == 1) 0x2f else 0x2b
-    val f3Field = if (idx >= 2) 4 + (idx - 2) else f3
+    val bit25 = if (basicFp) id & 1 else (id >> 6) & 1
+    val opcode = if (basicFp) 0x7b else if (idx == 0) 0x57 else if (idx == 1) 0x2f else 0x2b
+    val f3Field = if (basicFp) { if (id <= VecOp.vfsub32s) 4 else 5 }
+      else if (idx >= 2) 4 + (idx - 2) else f3
     (BigInt(mask.getOrElse(0)) << 27) | (if (mask.isEmpty) BigInt(1) << 26 else BigInt(0)) |
       (BigInt(bit25) << 25) | ((rs2 & 31) << 20) | (rs1 << 15) |
       (BigInt(f3Field) << 12) | (rd << 7) | opcode
@@ -180,6 +182,35 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugVRegs(0).expect(packed32(Seq(5, 5, 5, 5)))
       dut.io.debugVRegs(2).expect(packed32(Seq(1110, 111, 1012, 13)))
 
+      // Executable replacements for vector fused multiply-add, including
+      // dependent producers and masked tail preservation.
+      for (i <- 0 until 4) put32(512L + i * 4, 0x40000000L) // 2.0
+      run(Seq(
+        vsetivli(5, 4, vtype(sew = 2, lmul = 0)), addi(1, 0, 512),
+        instruction(VecOp.vle32, 1, 1, 0),
+        instruction(VecOp.vfmul32, 3, 1, 1), // 4.0
+        instruction(VecOp.vfadd32, 3, 1, 3), // 6.0, two-rounding lowering
+        instruction(VecOp.vfsub32, 4, 1, 3), // 4.0
+        flw(1, 1, 0),
+        instruction(VecOp.vfmul32s, 4, 1, 4), // 8.0, F scalar source
+        vsetivli(5, 2, vtype(sew = 2, lmul = 0)),
+        instruction(VecOp.vfsub32s, 4, 1, 4, mask = Some(0)),
+        fence, halt))
+      assert(dut.io.debugVRegs(3).peek().litValue == packed32(Seq.fill(4)(BigInt(0x40c00000L))))
+      assert(dut.io.debugVRegs(4).peek().litValue ==
+        packed32(Seq(0x40c00000L, 0x41000000L, 0x41000000L, 0x41000000L).map(BigInt(_))))
+      // Removed instructions fault precisely; younger stores never execute.
+      for (removed <- Seq(fdivs(2, 1, 1), fsqrts(2, 1), fmadds(2, 1, 1, 1),
+        instruction(VecOp.vfmacc32, 2, 1, 1))) {
+        run(Seq(fmuls(3, 1, 1), removed, sw(1, 1, 0), halt),
+          FaultCode.illegal.litValue.toInt, 4, removed.toLong)
+        assert(requests.isEmpty)
+        assert(dut.io.status.fault.peek().litToBoolean)
+        assert(dut.io.status.faultPc.peek().litValue == 4)
+      }
+      run(Seq(addi(5, 0, 123), halt)) // restart after drained FP pipeline
+      assert(dut.io.debugRegs(5).peek().litValue == 123)
+
       // vill: LMUL=2 is outside the baseline; vl becomes 0 and vtype gets vill.
       run(Seq(addi(4, 0, 8), vsetvli(5, 4, vtype(sew = 2, lmul = 1)), fence, halt))
       dut.io.debugRegs(5).expect(0)
@@ -225,6 +256,7 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugVRegs(1).expect(v1Before)
 
       // Masked load: v0 = 1 → only element 0 is active and in range.
+      val v3Before = dut.io.debugVRegs(3).peek().litValue
       put32(272L, 1)
       put32(p.dtcmBytes - 4, BigInt("87654321", 16))
       run(Seq(
@@ -236,7 +268,7 @@ class VectorCoreSpec extends AnyFunSuite with ChiselSim {
         instruction(VecOp.vle32, 3, 12, 0, mask = Some(0)),
         fence, halt))
       assert(requests.map(_._1).toSeq == Seq(272L, 276L, 280L, 284L, (p.dtcmBytes - 4).toLong))
-      dut.io.debugVRegs(3).expect(BigInt("87654321", 16))
+      dut.io.debugVRegs(3).expect((v3Before & ~BigInt("ffffffff", 16)) | BigInt("87654321", 16))
 
       // Illegal encodings raise illegal instructions.
       for (bad <- Seq(instruction(63, 7, 0, 0), instruction(70, 7, 0, 0),

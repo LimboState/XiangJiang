@@ -79,63 +79,138 @@ class ALUUnit(p: XJParams) extends ScalarFunctionalUnit(p) {
   }
 }
 
-/** Integer multiplier: MUL/MULH/MULHSU/MULHU with one registered completion. */
-class MluUnit(p: XJParams) extends ScalarFunctionalUnit(p) {
-  switch(uop.op) {
-    is(UOpCode.MUL) { result.data := (a * b)(31, 0) }
-    is(UOpCode.MULH) { result.data := (a.asSInt * b.asSInt)(63, 32).asUInt }
-    is(UOpCode.MULHSU) { result.data := (a.asSInt * Cat(0.U(1.W), b).asSInt)(63, 32).asUInt }
-    is(UOpCode.MULHU) { result.data := (a * b)(63, 32) }
+/** Three-cycle integer multiply; one shared signed 33x33 product. */
+class MluUnit(p: XJParams) extends Module {
+  val io = IO(new ScalarUnitIO(p))
+  private val idle :: multiply :: finish :: complete :: Nil = Enum(4)
+  private val state = RegInit(idle)
+  private val a = Reg(SInt(33.W))
+  private val b = Reg(SInt(33.W))
+  private val high = Reg(Bool())
+  private val product = Reg(SInt(66.W))
+  private val result = Reg(new ExeResult(p))
+  io.req.ready := state === idle && !io.flush
+  io.resp.valid := state === complete && !io.flush
+  io.resp.bits := result
+  io.busy := state =/= idle
+  when(io.flush) { state := idle }.otherwise {
+    when(io.req.fire) {
+      val op = io.req.bits.uop.op
+      val x = io.req.bits.src1.value
+      val y = io.req.bits.src2.value
+      a := Cat((op === UOpCode.MULH || op === UOpCode.MULHSU) && x(31), x).asSInt
+      b := Cat(op === UOpCode.MULH && y(31), y).asSInt
+      high := op =/= UOpCode.MUL
+      result := 0.U.asTypeOf(new ExeResult(p))
+      result.tag := io.req.bits.uop.tag
+      result.seq := io.req.bits.uop.seq
+      result.nextPc := io.req.bits.uop.pc + 4.U
+      state := multiply
+    }
+    when(state === multiply) { product := a * b; state := finish }
+    when(state === finish) {
+      result.data := Mux(high, product(63, 32), product(31, 0))
+      state := complete
+    }
+    when(io.resp.fire) { state := idle }
   }
 }
 
-/** Integer divider: DIV/DIVU/REM/REMU with standard RISC-V boundary results. */
-class DvuUnit(p: XJParams) extends ScalarFunctionalUnit(p) {
-  val divZero = b === 0.U
-  val signed = uop.op === UOpCode.DIV || uop.op === UOpCode.REM
-  val overflow = signed && a === "h80000000".U && b === "hffffffff".U
-  val den = Mux(divZero, 1.U, b)
-  val sQuotient = (a.asSInt / den.asSInt).asUInt
-  val uQuotient = a / den
-  val sRemainder = (a.asSInt % den.asSInt).asUInt
-  val uRemainder = a % den
-  val isRem = uop.op === UOpCode.REM || uop.op === UOpCode.REMU
-  result.data := Mux(isRem,
-    Mux(divZero, a, Mux(overflow, 0.U, Mux(signed, sRemainder, uRemainder))),
-    Mux(divZero, "hffffffff".U(32.W),
-      Mux(overflow, a, Mux(signed, sQuotient, uQuotient))))
+/** Radix-2 restoring divide: input capture, 32 steps, sign/exception finish.
+  * No combinational / or %; quotient and remainder share the same datapath.
+  */
+class DvuUnit(p: XJParams) extends Module {
+  val io = IO(new ScalarUnitIO(p))
+  private val idle :: iterate :: finish :: complete :: Nil = Enum(4)
+  private val state = RegInit(idle)
+  private val quotient = Reg(UInt(32.W))
+  private val remainder = Reg(UInt(32.W))
+  private val divisor = Reg(UInt(32.W))
+  private val original = Reg(UInt(32.W))
+  private val count = Reg(UInt(5.W))
+  private val quotientNegative = Reg(Bool())
+  private val remainderNegative = Reg(Bool())
+  private val zero = Reg(Bool())
+  private val isRem = Reg(Bool())
+  private val result = Reg(new ExeResult(p))
+  io.req.ready := state === idle && !io.flush
+  io.resp.valid := state === complete && !io.flush
+  io.resp.bits := result
+  io.busy := state =/= idle
+  val trial = Cat(remainder, quotient(31))
+  val subtract = trial >= Cat(0.U(1.W), divisor)
+  val nextRemainder = Mux(subtract, trial - divisor, trial)
+  when(io.flush) { state := idle }.otherwise {
+    when(io.req.fire) {
+      val op = io.req.bits.uop.op
+      val a = io.req.bits.src1.value
+      val b = io.req.bits.src2.value
+      val signed = op === UOpCode.DIV || op === UOpCode.REM
+      quotient := Mux(signed && a(31), -a, a)
+      divisor := Mux(signed && b(31), -b, b)
+      original := a
+      quotientNegative := signed && (a(31) ^ b(31))
+      remainderNegative := signed && a(31)
+      zero := b === 0.U
+      isRem := op === UOpCode.REM || op === UOpCode.REMU
+      remainder := 0.U
+      count := 0.U
+      result := 0.U.asTypeOf(new ExeResult(p))
+      result.tag := io.req.bits.uop.tag
+      result.seq := io.req.bits.uop.seq
+      result.nextPc := io.req.bits.uop.pc + 4.U
+      state := iterate
+    }
+    when(state === iterate) {
+      quotient := Cat(quotient(30, 0), subtract)
+      remainder := nextRemainder(31, 0)
+      count := count + 1.U
+      when(count === 31.U) { state := finish }
+    }
+    when(state === finish) {
+      val q = Mux(quotientNegative, -quotient, quotient)
+      val r = Mux(remainderNegative, -remainder, remainder)
+      result.data := Mux(isRem, Mux(zero, original, r), Mux(zero, "hffffffff".U, q))
+      state := complete
+    }
+    when(io.resp.fire) { state := idle }
+  }
 }
 
 /** Scalar FP32 core: the F-extension selection.  Executes with the instruction
   * rounding mode or the dispatch-time frm snapshot; candidate exception flags
   * ride the completion record and merge into fflags at commit.
   */
-class FloatCore(p: XJParams) extends ScalarFunctionalUnit(p) {
-  private val fa = io.req.bits.fsrc1.value
-  private val fb = io.req.bits.fsrc2.value
-  private val fc = io.req.bits.fsrc3.value
-  private val rm = Mux(uop.rm === 7.U, io.req.bits.frm, uop.rm)
+class FloatCore(p: XJParams) extends Module {
+  val io = IO(new ScalarUnitIO(p))
+  private val idle :: execute :: complete :: Nil = Enum(3)
+  private val state = RegInit(idle)
+  private val request = Reg(new IssueEntry(p))
+  private val result = Reg(new ExeResult(p))
+  private val count = Reg(UInt(3.W))
+  private val uop = request.uop
+  private val a = request.src1.value
+  private val fa = request.fsrc1.value
+  private val fb = request.fsrc2.value
+  private val rm = Mux(uop.rm === 7.U, request.frm, uop.rm)
+  io.req.ready := state === idle && !io.flush
+  io.resp.valid := state === complete && !io.flush
+  io.resp.bits := result
+  io.busy := state =/= idle
   private val outResult = WireDefault(0.U(32.W))
   private val outFlags = WireDefault(0.U(5.W))
   private def apply(op: (UInt, UInt)): Unit = {
     outResult := op._1
     outFlags := op._2
   }
-  private def negate(op: (UInt, UInt)): Unit = {
-    val nanResult = op._1(30, 23).andR && op._1(22, 0).orR
-    outResult := Mux(nanResult, "h7fc00000".U(32.W), op._1 ^ "h80000000".U(32.W))
-    outFlags := op._2
-  }
+  // Build pipeline registers outside conditional scopes: every stage advances
+  // together; only completion.valid gives their data architectural meaning.
+  private val add = VectorFloat.f32Add(fa,
+    Cat(fb(31) ^ (uop.op === UOpCode.FSUB), fb(30, 0)), rm, pipelined = true)
+  private val mul = VectorFloat.f32Mul(fa, fb, rm, pipelined = true)
   switch(uop.op) {
-    is(UOpCode.FADD) { apply(VectorFloat.f32Add(fa, fb, rm)) }
-    is(UOpCode.FSUB) { apply(VectorFloat.f32Add(fa, Cat(!fb(31), fb(30, 0)), rm)) }
-    is(UOpCode.FMUL) { apply(VectorFloat.f32Mul(fa, fb, rm)) }
-    is(UOpCode.FDIV) { apply(VectorFloat.f32Div(fa, fb, rm)) }
-    is(UOpCode.FSQRT) { apply(VectorFloat.f32Sqrt(fa, rm)) }
-    is(UOpCode.FMADD) { apply(VectorFloat.f32Fma(fa, fb, fc, rm)) }
-    is(UOpCode.FMSUB) { apply(VectorFloat.f32Fma(fa, fb, Cat(!fc(31), fc(30, 0)), rm)) }
-    is(UOpCode.FNMSUB) { negate(VectorFloat.f32Fma(fa, fb, Cat(!fc(31), fc(30, 0)), rm)) }
-    is(UOpCode.FNMADD) { negate(VectorFloat.f32Fma(fa, fb, fc, rm)) }
+    is(UOpCode.FADD, UOpCode.FSUB) { apply(add) }
+    is(UOpCode.FMUL) { apply(mul) }
     is(UOpCode.FEQ) {
       val r = VectorFloat.f32Cmp(fa, fb, 0.U)
       outResult := r._1.asUInt
@@ -153,8 +228,8 @@ class FloatCore(p: XJParams) extends ScalarFunctionalUnit(p) {
     }
     is(UOpCode.FCVTWS) { apply(VectorFloat.f32ToInt(fa, rm, false)) }
     is(UOpCode.FCVTWUS) { apply(VectorFloat.f32ToInt(fa, rm, true)) }
-    is(UOpCode.FCVTSW) { apply(VectorFloat.intToF32(fa, rm, false)) }
-    is(UOpCode.FCVTSWU) { apply(VectorFloat.intToF32(fa, rm, true)) }
+    is(UOpCode.FCVTSW) { apply(VectorFloat.intToF32(a, rm, false)) }
+    is(UOpCode.FCVTSWU) { apply(VectorFloat.intToF32(a, rm, true)) }
     is(UOpCode.FMVXW) {
       outResult := fa
       outFlags := 0.U
@@ -164,8 +239,27 @@ class FloatCore(p: XJParams) extends ScalarFunctionalUnit(p) {
       outFlags := 0.U
     }
   }
-  result.data := outResult
-  result.fflags := outFlags
+  when(io.flush) { state := idle }.otherwise {
+    when(io.req.fire) {
+      request := io.req.bits
+      count := 0.U
+      state := execute
+    }
+    when(state === execute) {
+      count := count + 1.U
+      // Input register + four arithmetic boundaries + registered completion.
+      when(count === 4.U) {
+        result := 0.U.asTypeOf(new ExeResult(p))
+        result.tag := uop.tag
+        result.seq := uop.seq
+        result.nextPc := uop.pc + 4.U
+        result.data := outResult
+        result.fflags := outFlags
+        state := complete
+      }
+    }
+    when(io.resp.fire) { state := idle }
+  }
 }
 
 /** Issued only at the ROB head; checks the selected PC, never an unused target. */

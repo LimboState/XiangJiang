@@ -9,8 +9,9 @@ class VivadoResourcesSpec extends AnyFunSuite {
     "bf16.sv" -> """module SystolicPE(
 );
   reg [31:0] accumulator;
+  reg [15:0] product_product;
   always @(posedge clock) begin
-    automatic logic [15:0] product_product = a * b;
+    product_product <= a * b;
     accumulator <= accumulator + product;
   end
 endmodule
@@ -30,7 +31,7 @@ endmodule
     val result = Elaborate.annotateResources(sources, Elaborate.ResourcePolicy())
     assert(result.sources("itcm.sv").contains("(* ram_style = \"block\" *) reg"))
     assert(result.sources("dtcm.sv").contains("(* ram_style = \"block\" *) reg"))
-    assert(result.sources("bf16.sv").contains("(* use_dsp = \"yes\" *) automatic logic [15:0] product_product"))
+    assert(result.sources("bf16.sv").contains("(* use_dsp = \"yes\" *) reg [15:0] product_product"))
     assert(!result.sources("bf16.sv").contains("*) reg [31:0] accumulator"))
     assert(result.sources("int8.sv").contains("(* use_dsp = \"yes\" *) reg [31:0] accumulator"))
     assert(result.sources("vector.sv") == sources("vector.sv"))

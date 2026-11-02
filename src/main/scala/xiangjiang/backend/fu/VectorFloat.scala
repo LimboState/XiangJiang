@@ -3,9 +3,11 @@ package xiangjiang.backend.fu
 import chisel3._
 import chisel3.util._
 
-/** Combinational IEEE binary arithmetic, RNE with gradual underflow and no flags.
-  * Alignment retains guard/round/sticky bits; FMA retains the full product until
-  * its sole rounding. Datapaths scale with precision, not the exponent range.
+/** Binary arithmetic helpers. Basic add/mul optionally insert four internal
+  * register boundaries; callers qualify valid and align instruction metadata.
+  * RNE generic operations and rm/flags FP32 operations retain gradual underflow.
+  * Uninstantiated combinational div/sqrt/FMA remain as test/reference helpers,
+  * not supported instructions in the timing-oriented top-level implementation.
   */
 object VectorFloat {
   private val bias = 127
@@ -38,40 +40,46 @@ object VectorFloat {
   }
 
   /** Round the exact/sticky magnitude times 2^scale to a p-bit significand. */
-  private def round(magnitude: UInt, scale: SInt, sign: Bool, p: Int): UInt = {
+  private def round(magnitude: UInt, scale: SInt, inputSign: Bool, p: Int,
+                    pipelined: Boolean = false): UInt = {
     val w = magnitude.getWidth
     require(w >= p + 3)
     val leading = PriorityEncoder(Reverse(magnitude))
-    val normalized = (magnitude << leading)(w - 1, 0)
-    val exponent = scale + (w - 1).S(12.W) - leading.zext
+    val normalized = stage((magnitude << leading)(w - 1, 0), pipelined)
+    val exponent = stage(scale + (w - 1).S(12.W) - leading.zext, pipelined)
     val underflow = Mux(exponent < emin.S, emin.S(12.W) - exponent, 0.S(12.W))
-    val shifted = jam(normalized, ((w - p - 3).S(12.W) + underflow).asUInt)
+    val shifted = stage(jam(normalized, ((w - p - 3).S(12.W) + underflow).asUInt), pipelined)
+    val sign = delay(inputSign, 2, pipelined)
+    val nonzero = delay(magnitude.orR, 2, pipelined)
     val kept = shifted(p + 2, 3)
     val increment = shifted(2) && (shifted(1, 0).orR || kept(0))
     val rounded = kept +& increment
-    val effectiveExponent = Mux(exponent < emin.S, emin.S(12.W), exponent)
+    val effectiveExponent = stage(Mux(exponent < emin.S, emin.S(12.W), exponent), pipelined)
     val finalExponent = effectiveExponent + rounded(p).asUInt.zext
     val fraction = Mux(rounded(p), rounded(p - 1, 1), rounded(p - 2, 0))
     val biased = (finalExponent + bias.S(12.W)).asUInt
     val expField = Mux(rounded(p) || rounded(p - 1), biased(7, 0), 0.U(8.W))
-    Mux(!magnitude.orR, zero(sign, p),
+    Mux(!nonzero, zero(sign, p),
       Mux(finalExponent > 127.S, infinity(sign, p), Cat(sign, expField, fraction)))
   }
 
   /** Inputs have their leading bit at w-2 and an unbiased exponent. */
   private def sumMagnitudes(a: UInt, ae: SInt, as: Bool,
-                            b: UInt, be: SInt, bs: Bool, p: Int): UInt = {
+                            b: UInt, be: SInt, bs: Bool, p: Int, pipelined: Boolean = false): UInt = {
     val w = a.getWidth
     val common = Mux(ae >= be, ae, be)
-    val ax = jam(a, (common - ae).asUInt)
-    val bx = jam(b, (common - be).asUInt)
+    val ax = stage(jam(a, (common - ae).asUInt), pipelined)
+    val bx = stage(jam(b, (common - be).asUInt), pipelined)
+    val sa = stage(as, pipelined)
+    val sb = stage(bs, pipelined)
     val aLarger = ax >= bx
-    val magnitude = Mux(as === bs, ax + bx, Mux(aLarger, ax - bx, bx - ax))
-    val sign = Mux(!magnitude.orR, as && bs, Mux(as === bs || aLarger, as, bs))
-    round(magnitude, common - (w - 2).S(12.W), sign, p)
+    val magnitude = Mux(sa === sb, ax + bx, Mux(aLarger, ax - bx, bx - ax))
+    val sign = Mux(!magnitude.orR, sa && sb, Mux(sa === sb || aLarger, sa, sb))
+    round(stage(magnitude, pipelined), delay(common - (w - 2).S(12.W), 2, pipelined),
+      stage(sign, pipelined), p, pipelined)
   }
 
-  private def addGeneric(a: UInt, b: UInt, p: Int): UInt = {
+  private def addGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false): UInt = {
     val x = new Parts(a, p)
     val y = new Parts(b, p)
     val w = p + 5
@@ -80,28 +88,30 @@ object VectorFloat {
     // Zero's arbitrary decoded exponent must not shift a tiny nonzero operand.
     val ae = Mux(x.isZero, (-512).S(12.W), x.exponent)
     val be = Mux(y.isZero, (-512).S(12.W), y.exponent)
-    val finite = sumMagnitudes(ax, ae, x.sign, bx, be, y.sign, p)
-    Mux(x.isNaN || y.isNaN || (x.isInf && y.isInf && x.sign =/= y.sign), nan(p),
-      Mux(x.isInf, infinity(x.sign, p), Mux(y.isInf, infinity(y.sign, p), finite)))
+    val finite = sumMagnitudes(ax, ae, x.sign, bx, be, y.sign, p, pipelined)
+    Mux(delay(x.isNaN || y.isNaN || (x.isInf && y.isInf && x.sign =/= y.sign), 4, pipelined), nan(p),
+      Mux(delay(x.isInf, 4, pipelined), infinity(delay(x.sign, 4, pipelined), p),
+        Mux(delay(y.isInf, 4, pipelined), infinity(delay(y.sign, 4, pipelined), p), finite)))
   }
 
-  def add(a: UInt, b: UInt): UInt = addGeneric(a(15, 0), b(15, 0), 8)
+  def add(a: UInt, b: UInt, pipelined: Boolean = false): UInt = addGeneric(a(15, 0), b(15, 0), 8, pipelined)
   def sub(a: UInt, b: UInt): UInt = add(a, Cat(!b(15), b(14, 0)))
-  def add32(a: UInt, b: UInt): UInt = addGeneric(a(31, 0), b(31, 0), 24)
+  def add32(a: UInt, b: UInt, pipelined: Boolean = false): UInt = addGeneric(a(31, 0), b(31, 0), 24, pipelined)
 
-  private def mulGeneric(a: UInt, b: UInt, p: Int): UInt = {
+  private def mulGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false): UInt = {
     val x = new Parts(a, p)
     val y = new Parts(b, p)
     val sign = x.sign ^ y.sign
-    val product = x.normalized * y.normalized
+    val product = stage(stage(x.normalized, pipelined) * stage(y.normalized, pipelined), pipelined)
     val finite = round(Cat(product, 0.U(3.W)),
-      x.exponent + y.exponent - (2 * p + 1).S(12.W), sign, p)
-    Mux(x.isNaN || y.isNaN || (x.isInf && y.isZero) || (y.isInf && x.isZero), nan(p),
-      Mux(x.isInf || y.isInf, infinity(sign, p), finite))
+      delay(x.exponent + y.exponent - (2 * p + 1).S(12.W), 2, pipelined),
+      delay(sign, 2, pipelined), p, pipelined)
+    Mux(delay(x.isNaN || y.isNaN || (x.isInf && y.isZero) || (y.isInf && x.isZero), 4, pipelined), nan(p),
+      Mux(delay(x.isInf || y.isInf, 4, pipelined), infinity(delay(sign, 4, pipelined), p), finite))
   }
 
-  def mul(a: UInt, b: UInt): UInt = mulGeneric(a(15, 0), b(15, 0), 8)
-  def mul32(a: UInt, b: UInt): UInt = mulGeneric(a(31, 0), b(31, 0), 24)
+  def mul(a: UInt, b: UInt, pipelined: Boolean = false): UInt = mulGeneric(a(15, 0), b(15, 0), 8, pipelined)
+  def mul32(a: UInt, b: UInt, pipelined: Boolean = false): UInt = mulGeneric(a(31, 0), b(31, 0), 24, pipelined)
 
   private def divGeneric(a: UInt, b: UInt, p: Int): UInt = {
     val x = new Parts(a, p)
@@ -220,34 +230,51 @@ object VectorFloat {
       4.U -> shifted(2))) // RMM ties away
   }
 
-  private def roundF(magnitude: UInt, scale: SInt, sign: Bool, p: Int, rm: UInt): (UInt, UInt) = {
+  private def stage[T <: Data](x: T, pipelined: Boolean): T = {
+    if (pipelined) {
+      val r = Reg(chiselTypeOf(x))
+      r := x
+      r
+    } else x
+  }
+  private def delay[T <: Data](x: T, n: Int, pipelined: Boolean): T =
+    (0 until n).foldLeft(x)((v, _) => stage(v, pipelined))
+
+  // Optional two register boundaries: normalize, then subnormal shift.
+  // Callers must delay classification/flags and qualify the eventual output.
+  private def roundF(magnitude: UInt, scale: SInt, inputSign: Bool, p: Int,
+                     inputRm: UInt, pipelined: Boolean = false): (UInt, UInt) = {
     val w = magnitude.getWidth
     require(w >= p + 3)
     val leading = PriorityEncoder(Reverse(magnitude))
-    val normalized = (magnitude << leading)(w - 1, 0)
-    val exponent = scale + (w - 1).S(12.W) - leading.zext
+    val normalized = stage((magnitude << leading)(w - 1, 0), pipelined)
+    val exponent = stage(scale + (w - 1).S(12.W) - leading.zext, pipelined)
     val underflow = Mux(exponent < emin.S, emin.S(12.W) - exponent, 0.S(12.W))
-    val shifted = jam(normalized, ((w - p - 3).S(12.W) + underflow).asUInt)
+    val shifted = stage(jam(normalized, ((w - p - 3).S(12.W) + underflow).asUInt), pipelined)
+    val sign = delay(inputSign, 2, pipelined)
+    val rm = delay(inputRm, 2, pipelined)
+    val nonzero = delay(magnitude.orR, 2, pipelined)
     val kept = shifted(p + 2, 3)
     val increment = roundModeInc(kept, shifted, sign, rm)
     val rounded = kept +& increment
-    val effectiveExponent = Mux(exponent < emin.S, emin.S(12.W), exponent)
+    val effectiveExponent = stage(Mux(exponent < emin.S, emin.S(12.W), exponent), pipelined)
     val finalExponent = effectiveExponent + rounded(p).asUInt.zext
     val fraction = Mux(rounded(p), rounded(p - 1, 1), rounded(p - 2, 0))
     val biased = (finalExponent + bias.S(12.W)).asUInt
     val expField = Mux(rounded(p) || rounded(p - 1), biased(7, 0), 0.U(8.W))
     val inexact = shifted(2, 0).orR
     val overflow = finalExponent > 127.S
-    val tiny = magnitude.orR &&
+    val tiny = nonzero &&
       (finalExponent < emin.S || (!rounded(p) && !rounded(p - 1)))
-    val result = Mux(!magnitude.orR, zero(sign, p),
+    val result = Mux(!nonzero, zero(sign, p),
       Mux(overflow, infinity(sign, p), Cat(sign, expField, fraction)))
     (result, Cat(0.U(1.W), 0.U(1.W), overflow, tiny && inexact, inexact || overflow))
   }
 
   private def snan(x: Parts): Bool = x.isNaN && !x.fraction(22)
 
-  def f32Add(a: UInt, b: UInt, rm: UInt): (UInt, UInt) = {
+  /** Four internal register boundaries when pipelined; final rounding is combinational. */
+  def f32Add(a: UInt, b: UInt, rm: UInt, pipelined: Boolean = false): (UInt, UInt) = {
     val x = new Parts(a(31, 0), 24)
     val y = new Parts(b(31, 0), 24)
     val w = 29
@@ -256,31 +283,37 @@ object VectorFloat {
     val ae = Mux(x.isZero, (-512).S(12.W), x.exponent)
     val be = Mux(y.isZero, (-512).S(12.W), y.exponent)
     val common = Mux(ae >= be, ae, be)
-    val axs = jam(ax, (common - ae).asUInt)
-    val bxs = jam(bx, (common - be).asUInt)
+    val axs = stage(jam(ax, (common - ae).asUInt), pipelined)
+    val bxs = stage(jam(bx, (common - be).asUInt), pipelined)
+    val xs = stage(x.sign, pipelined)
+    val ys = stage(y.sign, pipelined)
     val aLarger = axs >= bxs
-    val magnitude = Mux(x.sign === y.sign, axs + bxs, Mux(aLarger, axs - bxs, bxs - axs))
-    val sign = Mux(!magnitude.orR, x.sign && y.sign,
-      Mux(x.sign === y.sign || aLarger, x.sign, y.sign))
-    val rounded = roundF(magnitude, common - 27.S(12.W), sign, 24, rm)
-    val nv = snan(x) || snan(y) || (x.isInf && y.isInf && x.sign =/= y.sign)
-    val result = Mux(x.isNaN || y.isNaN, nan(24),
-      Mux(x.isInf && y.isInf && x.sign =/= y.sign, nan(24),
-        Mux(x.isInf || y.isInf, infinity(Mux(x.isInf, x.sign, y.sign), 24), rounded._1)))
-    (result, rounded._2 | Cat(nv, 0.U(4.W)))
+    val magnitude = Mux(xs === ys, axs + bxs, Mux(aLarger, axs - bxs, bxs - axs))
+    val sign = Mux(!magnitude.orR, xs && ys, Mux(xs === ys || aLarger, xs, ys))
+    val rounded = roundF(stage(magnitude, pipelined), delay(common - 27.S(12.W), 2, pipelined),
+      stage(sign, pipelined), 24, delay(rm, 2, pipelined), pipelined)
+    val invalid = snan(x) || snan(y) || (x.isInf && y.isInf && x.sign =/= y.sign)
+    val special = x.isNaN || y.isNaN || x.isInf || y.isInf
+    val specialResult = Mux(x.isNaN || y.isNaN || (x.isInf && y.isInf && x.sign =/= y.sign),
+      nan(24), infinity(Mux(x.isInf, x.sign, y.sign), 24))
+    val result = Mux(delay(special, 4, pipelined), delay(specialResult, 4, pipelined), rounded._1)
+    (result, rounded._2 | Cat(delay(invalid, 4, pipelined), 0.U(4.W)))
   }
 
-  def f32Mul(a: UInt, b: UInt, rm: UInt): (UInt, UInt) = {
+  def f32Mul(a: UInt, b: UInt, rm: UInt, pipelined: Boolean = false): (UInt, UInt) = {
     val x = new Parts(a(31, 0), 24)
     val y = new Parts(b(31, 0), 24)
     val sign = x.sign ^ y.sign
-    val product = x.normalized * y.normalized
+    val product = stage(stage(x.normalized, pipelined) * stage(y.normalized, pipelined), pipelined)
     val finite = roundF(Cat(product, 0.U(3.W)),
-      x.exponent + y.exponent - 49.S(12.W), sign, 24, rm)
+      delay(x.exponent + y.exponent - 49.S(12.W), 2, pipelined),
+      delay(sign, 2, pipelined), 24, delay(rm, 2, pipelined), pipelined)
     val nv = snan(x) || snan(y) || (x.isInf && y.isZero) || (y.isInf && x.isZero)
-    val result = Mux(x.isNaN || y.isNaN, nan(24),
-      Mux(x.isInf || y.isInf, infinity(sign, 24), finite._1))
-    (result, finite._2 | Cat(nv, 0.U(4.W)))
+    val special = x.isNaN || y.isNaN || x.isInf || y.isInf
+    val specialResult = Mux(x.isNaN || y.isNaN || (x.isInf && y.isZero) || (y.isInf && x.isZero),
+      nan(24), infinity(sign, 24))
+    val result = Mux(delay(special, 4, pipelined), delay(specialResult, 4, pipelined), finite._1)
+    (result, finite._2 | Cat(delay(nv, 4, pipelined), 0.U(4.W)))
   }
 
   def f32Div(a: UInt, b: UInt, rm: UInt): (UInt, UInt) = {

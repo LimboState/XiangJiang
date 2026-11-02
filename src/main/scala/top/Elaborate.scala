@@ -87,7 +87,11 @@ object Elaborate {
         s"Vivado resource policy: expected one 16-bit multiply assignment for $name in $file")
       annotate(file, declaration, s"use_dsp = \"${policy.peDsp}\"")
     }
-    multiplier(bf16, "product_product") // 8x8 significand only; NOT FP32 adder
+    // BF16 significand multiplication is now registered (8x8, not FP32 add).
+    val bfProduct = "(?m)^\\s*product_product <= [^;]*;".r.findAllIn(output(bf16)).toVector
+    require(bfProduct.size == 1 && bfProduct.head.count(_ == '*') == 1,
+      "Vivado resource policy: expected one registered BF16 significand multiply")
+    annotate(bf16, "reg [15:0] product_product;", s"use_dsp = \"${policy.peDsp}\"")
     multiplier(int8, "_product_T_2")
     annotate(int8, "reg [31:0] accumulator;", s"use_dsp = \"${policy.peDsp}\"")
 

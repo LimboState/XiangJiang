@@ -69,10 +69,11 @@ class ScalarIsaProgramSpec extends AnyFunSuite with ChiselSim {
         dut.io.start.poke(true); tick(); dut.io.start.poke(false)
         val deadline = cycles + 40000
         while (dut.io.status.busy.peek().litToBoolean && cycles < deadline) tick()
+        assert(cycles < deadline, s"program timeout; retirement PCs $commits")
         dut.io.status.busy.expect(false)
         dut.io.status.fault.expect(false)
         dut.io.status.done.expect(true)
-        assert(commits.toSeq == words.indices.map(_ * 4), s"retirement PCs $commits")
+        assert(commits.toSeq == words.indices.map(_ * 4), s"retirement PCs $commits; program=${words.map(_.toString(16))}")
       }
       val bits32 = (BigInt(1) << 32) - 1
       def w(x: BigInt): BigInt = x & bits32
@@ -131,23 +132,23 @@ class ScalarIsaProgramSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugRegs(18).expect(w((x >> 5) | (x << 27))) // ror by 5
       dut.io.debugRegs(19).expect(w((x >> 4) | (x << 28))) // rori by 4
 
-      // F selection: FLW/FADD.S/FMUL.S/FDIV.S/FSW and fflags via CSR.
+      // Retained F subset: load/add/multiply/store and inexact flags.
       put32(256L, BigInt("3f800000", 16)); put32(260L, BigInt("40000000", 16))
-      put32(264L, BigInt("40400000", 16)) // 3.0
+      put32(264L, BigInt("33800000", 16)) // 2^-24: tie when added to 1
       run(Seq(
         addi(1, 0, 256),
         flw(0, 1, 0), flw(1, 1, 4), flw(2, 1, 8),
         fadds(3, 0, 1), fmuls(4, 0, 1),
         csrrw(5, 0x001, 0), // clear fflags, read old
-        fdivs(6, 0, 2), // 1.0 / 3.0: inexact
+        fadds(6, 0, 2), // 1 + 2^-24: inexact, ties to even
         addi(1, 0, 320), fsw(6, 1, 0),
         csrrs(7, 0x001, 0),
         fence, halt))
       dut.io.debugFRegs(3).expect(BigInt("40400000", 16)) // 1.0 + 2.0
       dut.io.debugFRegs(4).expect(BigInt("40000000", 16)) // 1.0 x 2.0
-      dut.io.debugFRegs(6).expect(BigInt("3eaaaaab", 16)) // 1.0 / 3.0
-      assert(get32(320L) == BigInt("3eaaaaab", 16))
-      dut.io.debugRegs(7).expect(1) // NX sticky after 1/3
+      dut.io.debugFRegs(6).expect(BigInt("3f800000", 16))
+      assert(get32(320L) == BigInt("3f800000", 16))
+      dut.io.debugRegs(7).expect(1) // NX sticky after rounded add
       // frm plumbing: RTZ rounds 7.5 down, RNE rounds it up.
       run(Seq(
         csrrwi(0, 0x002, 1), // frm := RTZ
@@ -160,11 +161,11 @@ class ScalarIsaProgramSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugRegs(3).expect(7)
       dut.io.debugRegs(4).expect(8)
 
-      // FMADD and FMV round-trips.
+      // Explicit non-fused multiply/add and FMV round-trips.
       run(Seq(
         addi(1, 0, 256),
         flw(0, 1, 0), flw(1, 1, 4),
-        fmadds(4, 0, 1, 0), // 1*2+1 = 3
+        fmuls(4, 0, 1), fadds(4, 4, 0), // 1*2+1 = 3
         fmvxw(5, 4),
         fmvwx(6, 5),
         fsubs(7, 4, 6),

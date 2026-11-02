@@ -73,12 +73,12 @@ XJ-ISA 基于 RISC-V 编码和语义，选取推理计算及控制流程所需�
 | --- | --- |
 | 浮点访存 | `FLW`、`FSW` |
 | 基本计算 | `FADD.S`、`FSUB.S`、`FMUL.S` |
-| 融合乘加 | `FMADD.S`、`FMSUB.S`、`FNMSUB.S`、`FNMADD.S` |
-| 除法与开方 | `FDIV.S`、`FSQRT.S` |
 | 比较 | `FEQ.S`、`FLT.S`、`FLE.S` |
 | 数值转换 | `FCVT.W.S`、`FCVT.WU.S`、`FCVT.S.W`、`FCVT.S.WU` |
 | 位模式搬运 | `FMV.X.W`、`FMV.W.X` |
 
+100 MHz 实现裁剪 `FMADD.S/FMSUB.S/FNMSUB.S/FNMADD.S/FDIV.S/FSQRT.S`，
+矩阵 MAC 保留；软件替代的精度边界见 [时序实现说明](XJ-TIMING-100MHz.md)。
 未纳入选集的编码按 Illegal Instruction 处理。浮点运算采用指令给定的舍入模式，或派发时确定的 `frm` 快照；候选异常标志随结果保存到 ROB，在提交时更新 `fflags`。浮点异常标志本身不自动触发同步 trap。[RISC-V F 2.2](https://docs.riscv.org/reference/isa/v20260120/unpriv/f-st-ext.html)
 
 ### 2.3. 向量指令
@@ -89,7 +89,7 @@ XJ-ISA 基于 RISC-V 编码和语义，选取推理计算及控制流程所需�
 | --- | --- | --- |
 | 配置 | `vsetvli`、`vsetivli`、`vsetvl` | 设置元素宽度、向量长度和寄存器组 |
 | 整数与定点 | 加减、移位、比较、饱和、窄化、乘法和 MAC | 量化、反量化辅助处理、定点缩放 |
-| FP32 | 加减乘、FMA、比较、转换、除法、开方与估算 | 逐元素运算、归一化和激活函数中的基础计算 |
+| FP32 | 加减乘、比较、转换；除法/开方由软件近似或软件精确例程实现 | 逐元素运算、归一化和激活函数中的基础计算 |
 | 归约与掩码 | 求和、最大/最小、掩码生成和统计 | Softmax 与归一化中的归约步骤 |
 | 重排 | Gather、Slide、Compress、索引生成 | 数据布局调整和索引选择 |
 | 访存 | 连续、跨步、索引、分段及其他选定形式 | 张量片段装载与存储 |
@@ -169,7 +169,7 @@ XJ-ISA 基于 RISC-V 编码和语义，选取推理计算及控制流程所需�
 | CSR/Configuration Unit | 1 | CSR 与 Vector/Matrix/DMA 配置处理 |
 | Commit/Fault Controller | 1 | 顺序提交、故障记录、Flush 与 Host 通知 |
 
-ADD/SUB 共享加法器。整数乘法与除法由于数据通路、延迟及流水结构不同，使用独立单元。FloatCore 内部共享 add/mul/FMA 的部分硬件资源，并设置独立或迭代式 div/sqrt 通路；共享方式不改变各指令的舍入语义。
+ADD/SUB 共享加法器。整数乘法与除法由于数据通路、延迟及流水结构不同，使用独立单元。100 MHz 实现中 FloatCore 共享加减流水通路，设置独立乘法流水通路，移除标量 FMA/div/sqrt 硬件；保留运算的舍入语义不因切流水改变。整数 MLU 3 周期，DVU 34 周期，FloatCore 6 周期，均不包含发射等待与写回反压。
 
 ### 3.2. 向量功能单元
 
@@ -178,8 +178,7 @@ ADD/SUB 共享加法器。整数乘法与除法由于数据通路、延迟及流
 | VALU | 1 | `VEU_ALU`、`VEU_CMP` | 整数/定点算术、逻辑、移位、饱和、窄化和比较 |
 | VMUL/MAC | 1 | `VEU_MUL`、`VEU_MAC` | 整数乘法、合法宽度的 widening、乘加和定点乘法 |
 | VDIV | 1 | `VEU_DIV` | 整数除法和求余 |
-| VFALU | 1 | `VEU_FMA/FCVT/FNCMP/FCMP/FTBL` | FP32 算术、FMA、转换、min/max、符号、分类、比较与估算 |
-| VFDIV/SQRT | 1 | `VEU_FDIV` | FP32 除法、反向除法和平方根 |
+| VFALU | 1 | `VEU_FCVT/FNCMP/FCMP/FTBL` | 所选 FP32 加减乘、转换、min/max、比较；浮点 FMA/div/sqrt 已裁剪 |
 | PMTRDT | 1 | `VEU_PMT/RDT/FRDT/MISC` | 重排、整数/FP32 归约、掩码统计和索引生成 |
 | Vector LSU Sequencer | 1 | `LSU` | 将选定向量访存分解为元素、分段和 beat 请求 |
 

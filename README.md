@@ -4,7 +4,8 @@ XiangJiang NPU 是面向机器学习模型推理的单指令流硬件加速器�
 标量/向量/矩阵协同执行、顺序提交，以及软件管理的 TCM 与二维 DMA。
 
 架构基准与唯一事实来源：[XiangJiang NPU V1 架构](docs/XJ-NPU.md)。
-迁移追踪矩阵：[docs/XJ-NPU-IMPLEMENTATION-PLAN.md](docs/XJ-NPU-IMPLEMENTATION-PLAN.md)。
+100 MHz 实现、指令裁剪和时序验收：[docs/XJ-TIMING-100MHz.md](docs/XJ-TIMING-100MHz.md)。
+当前已完成 RTL 仿真与导出；未完成 Vivado 布局布线时序签核。
 
 **完整 ISA 总表：** [全部指令、编码、操作数与实现状态](docs/XJ-ISA-Support.md)。
 该表区分架构目标、当前机器译码可达的指令和仅存在 FU 路径的操作，并列出已知偏差。
@@ -12,14 +13,14 @@ XiangJiang NPU 是面向机器学习模型推理的单指令流硬件加速器�
 
 - **标量**：`rv32im_zicsr_zifencei` + Zbb 选集（`ANDN/ORN/XNOR/MIN/MINU/MAX/MAXU/
   CLZ/CTZ/CPOP/SEXT.B/SEXT.H/ZEXT.H/ROL/ROR/RORI/REV8/ORC.B`）+ F 扩展选集
-  （`FLW/FSW/FADD.S/FSUB.S/FMUL.S/FDIV.S/FSQRT.S/FMADD.S/FMSUB.S/FNMSUB.S/
-  FNMADD.S/FEQ.S/FLT.S/FLE.S/FCVT.W.S/FCVT.WU.S/FCVT.S.W/FCVT.S.WU.S/
+  （`FLW/FSW/FADD.S/FSUB.S/FMUL.S/FEQ.S/FLT.S/FLE.S/
+  FCVT.W.S/FCVT.WU.S/FCVT.S.W/FCVT.S.WU.S/
   FMV.X.W/FMV.W.X`）。FP32 支持静态舍入模式与 `frm`，候选 `fflags` 按程序
   顺序在提交点合并。逐条编码与状态见
   [docs/XJ-ISA-Support.md](docs/XJ-ISA-Support.md)。
 - **向量**：`VLEN=DLEN=128`、`ELEN=32`，`vsetvli/vsetivli/vsetvl` 配置，
   SEW 8/16/32（EMUL≥32 的 LMUL ∈ {1, 1/2, 1/4}；不支持的 vtype 置 `vill`），
-  tail/mask 保留，整数/逻辑/移位/比较、FP32 算术/FMA/除法/开方/比较/转换/
+  tail/mask 保留，整数/逻辑/移位/比较、FP32 加减乘/比较/转换/
   归约、slide/gather/merge，以及 `vle8/vle16/vle32/vse8/vse16/vse32`。
   `vstart>0` 与 `vill` 下执行向量指令按非法指令报错。完整 Zve32f 不声明。
 - **矩阵**：三个 8×8 阵列——MU0（BF16 输入 / FP32 累加，仅 OS），MU1/MU2
@@ -56,6 +57,11 @@ Vivado IP 打包（默认 ZCU102）：
 ./mill xj.runMain top.Elaborate generated/vivado 100000000
 vivado -mode batch -source generated/vivado/package_ip.tcl
 ```
+
+浮点除法、开方及标量/向量融合乘加已裁剪，旧编码报非法指令；矩阵 MAC 保留。
+整数乘法为 3 周期、除法/求余为 34 周期，标量浮点为 6 周期。
+BF16 矩阵为保持原有累加顺序，每 5 拍推进一次；INT8 保持每拍推进。
+时序验收脚本：`scripts/check_timing_100mhz.tcl`（打开 routed checkpoint 后执行）。
 
 `top.Elaborate` 额外输出 `XiangJiangAXI` 封装（Xilinx AXI 元数据、低有效复位、
 紧凑 Host 地址窗口）、综合清单与 IP 打包脚本。

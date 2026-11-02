@@ -13,8 +13,8 @@ import xiangjiang._
   * operations keep their fixed 8-lane 16-bit layout.
   *
   * FP32 operations require SEW=32, which dispatch enforces. The unit visits
-  * one element per cycle and reports a single completion when all elements
-  * are merged.
+  * one integer element per cycle, or one FP element per five cycles, and
+  * reports a single completion when all elements are merged.
   */
 class VectorUnit(p: XJParams) extends Module {
   val io = IO(new ScalarUnitIO(p))
@@ -33,6 +33,8 @@ class VectorUnit(p: XJParams) extends Module {
   private val accumulated = Reg(UInt(p.vlen.W))
   private val reduction = Reg(UInt(32.W))
   private val completion = Reg(new ExeResult(p))
+  // One lane is held stable while the four arithmetic stages drain.
+  private val laneCycle = RegInit(0.U(3.W))
 
   io.req.ready := state === idle && !io.flush
   io.resp.valid := state === complete && !io.flush
@@ -54,8 +56,7 @@ class VectorUnit(p: XJParams) extends Module {
   private val fp32UnaryCvt = op >= VecOp.vfcvtF2I32.U && op <= VecOp.vfcvtU2F32.U
   private val vmergeOp = op === VecOp.vmerge.U
   private val vgatherOp = op === VecOp.vrgather.U
-  private val slideOp = op === VecOp.vslideup.U || op === VecOp.vslideupImm.U ||
-    op === VecOp.vslidedown.U || op === VecOp.vslidedownImm.U
+  private val pipelinedLane = legacyBf16 || fp32Op || isReduction
 
   // Element extraction at SEW granularity (byte addressing over 128 bits).
   private def elem(reg: UInt, index: UInt): UInt = {
@@ -80,7 +81,6 @@ class VectorUnit(p: XJParams) extends Module {
       fScalar, scalar))
   private val b = Mux(op(0), bScalar, Mux(legacyBf16 || unaryOp,
     bf16Lane(source1, elSafe), elem(source1, elSafe)))
-  private val oldElem = Mux(legacyBf16 || unaryOp, bf16Lane(old, elSafe), elem(old, elSafe))
   private val sewBits = Mux(sew === 0.U, 8.U, Mux(sew === 1.U, 16.U, 32.U))
   private val signExt = Mux(sew === 0.U, Cat(Fill(24, a(7)), a(7, 0)),
     Mux(sew === 1.U, Cat(Fill(16, a(15)), a(15, 0)), a))
@@ -88,6 +88,14 @@ class VectorUnit(p: XJParams) extends Module {
     Mux(sew === 1.U, Cat(Fill(16, b(15)), b(15, 0)), b))
   private val shamtBits = Mux(sew === 0.U, b(2, 0), Mux(sew === 1.U, b(3, 0), b(4, 0)))
 
+  private val bfAdd = VectorFloat.add(a(15, 0),
+    Cat(b(15) ^ (op === VecOp.vfsub.U || op === (VecOp.vfsub + 1).U), b(14, 0)), pipelined = true)
+  private val bfMul = VectorFloat.mul(a(15, 0), b(15, 0), pipelined = true)
+  private val fpAdd = VectorFloat.add32(a,
+    Cat(b(31) ^ (op === VecOp.vfsub32.U || op === (VecOp.vfsub32 + 1).U), b(30, 0)), pipelined = true)
+  private val fpMul = VectorFloat.mul32(a, b, pipelined = true)
+  private val reductionAdd = VectorFloat.add32(reduction,
+    Mux(fp32Reduction, a, VectorFloat.widen(a(15, 0))), pipelined = true)
   private val value = WireDefault(0.U(32.W))
   private val comparison = WireDefault(false.B)
   switch(op) {
@@ -102,13 +110,8 @@ class VectorUnit(p: XJParams) extends Module {
     is(VecOp.vsll.U, (VecOp.vsll + 1).U) { value := (a << shamtBits)(31, 0) }
     is(VecOp.vsrl.U, (VecOp.vsrl + 1).U) { value := a >> shamtBits }
     is(VecOp.vsra.U, (VecOp.vsra + 1).U) { value := (signExt.asSInt >> shamtBits).asUInt }
-    is(VecOp.vfadd.U, (VecOp.vfadd + 1).U) { value := VectorFloat.add(a(15, 0), b(15, 0)) }
-    is(VecOp.vfsub.U, (VecOp.vfsub + 1).U) { value := VectorFloat.sub(a(15, 0), b(15, 0)) }
-    is(VecOp.vfmul.U, (VecOp.vfmul + 1).U) { value := VectorFloat.mul(a(15, 0), b(15, 0)) }
-    is(VecOp.vfdiv.U, (VecOp.vfdiv + 1).U) { value := VectorFloat.div(a(15, 0), b(15, 0)) }
-    is(VecOp.vfmacc.U, (VecOp.vfmacc + 1).U) {
-      value := VectorFloat.fma(a(15, 0), b(15, 0), oldElem(15, 0))
-    }
+    is(VecOp.vfadd.U, (VecOp.vfadd + 1).U, VecOp.vfsub.U, (VecOp.vfsub + 1).U) { value := bfAdd }
+    is(VecOp.vfmul.U, (VecOp.vfmul + 1).U) { value := bfMul }
     is(VecOp.vfmax.U, (VecOp.vfmax + 1).U) { value := VectorFloat.max(a(15, 0), b(15, 0)) }
     is(VecOp.vfmin.U, (VecOp.vfmin + 1).U) { value := VectorFloat.min(a(15, 0), b(15, 0)) }
     is(VecOp.vmseq.U, (VecOp.vmseq + 1).U) { comparison := a === b }
@@ -119,12 +122,8 @@ class VectorUnit(p: XJParams) extends Module {
     is(VecOp.vmfeq.U, (VecOp.vmfeq + 1).U) { comparison := VectorFloat.eq(a(15, 0), b(15, 0)) }
     is(VecOp.vmflt.U, (VecOp.vmflt + 1).U) { comparison := VectorFloat.lt(a(15, 0), b(15, 0)) }
     is(VecOp.vmfle.U, (VecOp.vmfle + 1).U) { comparison := VectorFloat.le(a(15, 0), b(15, 0)) }
-    is(VecOp.vfadd32.U, (VecOp.vfadd32 + 1).U) { value := VectorFloat.add32(a, b) }
-    is(VecOp.vfsub32.U, (VecOp.vfsub32 + 1).U) { value := VectorFloat.f32Add(a, Cat(!b(31), b(30, 0)), 0.U)._1 }
-    is(VecOp.vfmul32.U, (VecOp.vfmul32 + 1).U) { value := VectorFloat.mul32(a, b) }
-    is(VecOp.vfdiv32.U, (VecOp.vfdiv32 + 1).U) { value := VectorFloat.div32(a, b) }
-    is(VecOp.vfsqrt32.U) { value := VectorFloat.sqrt32(a) }
-    is(VecOp.vfmacc32.U, (VecOp.vfmacc32 + 1).U) { value := VectorFloat.fma32(a, b, oldElem) }
+    is(VecOp.vfadd32.U, (VecOp.vfadd32 + 1).U, VecOp.vfsub32.U, (VecOp.vfsub32 + 1).U) { value := fpAdd }
+    is(VecOp.vfmul32.U, (VecOp.vfmul32 + 1).U) { value := fpMul }
     is(VecOp.vfmax32.U, (VecOp.vfmax32 + 1).U) { value := VectorFloat.max32(a, b) }
     is(VecOp.vfmin32.U, (VecOp.vfmin32 + 1).U) { value := VectorFloat.min32(a, b) }
     is(VecOp.vfeq32.U, (VecOp.vfeq32 + 1).U) { comparison := VectorFloat.eq32(a, b) }
@@ -187,10 +186,10 @@ class VectorUnit(p: XJParams) extends Module {
   private val nextVector = Mux(isComparison || fp32Comparison, nextComparison,
     nextBytes.asUInt)
   private val reducedLegacy = Mux(uop.rs1 === VecOp.uFredSum.U,
-    VectorFloat.add32(reduction, VectorFloat.widen(a(15, 0))),
+    reductionAdd,
     VectorFloat.max(reduction(15, 0), a(15, 0)).pad(32))
   private val reducedFp32 = Mux(op === VecOp.vfredsum32.U,
-    VectorFloat.add32(reduction, a), VectorFloat.max32(reduction, a))
+    reductionAdd, VectorFloat.max32(reduction, a))
   private val nextReduction = Mux(fp32Reduction, reducedFp32, reducedLegacy)
   private val reduceActive = Mux(fp32Reduction, vlActive, legacyActive)
 
@@ -206,13 +205,16 @@ class VectorUnit(p: XJParams) extends Module {
       fScalar := io.req.bits.fsrc1.value
       mask := io.req.bits.vmask.value
       accumulated := io.req.bits.vold.value
-      reduction := Mux(fp32Reduction,
-        Mux(op === VecOp.vfredmax32.U, "hff800000".U(32.W), 0.U),
+      reduction := Mux(io.req.bits.uop.vecOp === VecOp.vfredsum32.U || io.req.bits.uop.vecOp === VecOp.vfredmax32.U,
+        Mux(io.req.bits.uop.vecOp === VecOp.vfredmax32.U, "hff800000".U(32.W), 0.U),
         Mux(io.req.bits.uop.rs1 === VecOp.uFredMax.U, "h0000ff80".U(32.W), 0.U))
       el := 0.U
+      laneCycle := 0.U
       state := running
     }
-    when(state === running) {
+    when(state === running) { laneCycle := laneCycle + 1.U }
+    when(state === running && (!pipelinedLane || laneCycle === 4.U)) {
+      laneCycle := 0.U
       accumulated := nextVector
       reduction := Mux(reduceActive, nextReduction, reduction)
       when(el === (maxElements - 1).U) {
@@ -221,7 +223,7 @@ class VectorUnit(p: XJParams) extends Module {
         completion.seq := uop.seq
         completion.nextPc := uop.pc + 4.U
         completion.data := Mux(isReduction || fp32Reduction,
-          nextReduction.pad(p.vlen), nextVector)
+          Mux(reduceActive, nextReduction, reduction).pad(p.vlen), nextVector)
         state := complete
       }.otherwise {
         el := el + 1.U

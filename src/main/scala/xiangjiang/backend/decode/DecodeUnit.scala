@@ -180,7 +180,7 @@ class DecodeUnit(p: XJParams) extends Module {
   // F arithmetic: rm must be a legal static rounding mode or DYN.
   val rmLegal = rm <= 4.U || rm === 7.U
   for ((f7, op) <- Seq((0x00, UOpCode.FADD), (0x04, UOpCode.FSUB),
-                       (0x08, UOpCode.FMUL), (0x0c, UOpCode.FDIV))) {
+                       (0x08, UOpCode.FMUL))) {
     when(opcode === "h53".U && funct7 === f7.U && rmLegal) {
       legal := true.B
       io.out.op := op
@@ -190,13 +190,9 @@ class DecodeUnit(p: XJParams) extends Module {
       io.out.writesF := true.B
     }
   }
-  when(opcode === "h53".U && funct7 === 0x2c.U && rs2Field === 0.U && rmLegal) {
-    legal := true.B
-    io.out.op := UOpCode.FSQRT
-    io.out.fu := FuType.fpu
-    io.out.usesF1 := true.B
-    io.out.writesF := true.B
-  }
+  // Timing-oriented inference subset: FDIV/FSQRT and scalar fused ops are
+  // intentionally illegal. Software uses reciprocal/rsqrt approximations
+  // and explicitly non-fused multiply/add; matrix MACs remain available.
   for ((f7, op) <- Seq((0x50, UOpCode.FEQ), (0x50, UOpCode.FLT), (0x50, UOpCode.FLE))) {
     val f3v = op match {
       case UOpCode.FEQ => 2
@@ -240,18 +236,6 @@ class DecodeUnit(p: XJParams) extends Module {
     io.out.fu := FuType.fpu
     io.out.usesRs1 := true.B
     io.out.writesF := true.B
-  }
-  for ((opcodeF, op) <- Seq(("h43".U, UOpCode.FMADD), ("h47".U, UOpCode.FMSUB),
-                            ("h4b".U, UOpCode.FNMSUB), ("h4f".U, UOpCode.FNMADD))) {
-    when(opcode === opcodeF && rmLegal) {
-      legal := true.B
-      io.out.op := op
-      io.out.fu := FuType.fpu
-      io.out.usesF1 := true.B
-      io.out.usesF2 := true.B
-      io.out.usesF3 := true.B
-      io.out.writesF := true.B
-    }
   }
 
   // Zicsr: CSRRW/CSRRS/CSRRC and immediate forms.  Read-only CSR writes are
@@ -372,13 +356,18 @@ class DecodeUnit(p: XJParams) extends Module {
   }
 
   // Vector opcodes use OP-V, the AMO opcode and custom-1 funct3 4..7.
-  val customOpcode = opcode === "h57".U || opcode === "h2f".U ||
+  // Dedicated non-colliding basic FP vector encodings. The legacy group
+  // packing could not encode VSUB32/VMUL32; software lowering needs both.
+  val basicVector = opcode === "h7b".U && (funct3 === 4.U || funct3 === 5.U)
+  val customOpcode = opcode === "h57".U || opcode === "h2f".U || basicVector ||
     (opcode === "h2b".U && funct3 >= 4.U)
   val customIndex = MuxLookup(opcode, 0.U(3.W))(Seq(
     "h57".U -> 0.U,
     "h2f".U -> 1.U,
     "h2b".U -> (2.U +& funct3(1, 0))))
-  val vecOp = Cat(inst(25), funct3, customIndex)
+  val vecOp = Mux(basicVector,
+    Mux(funct3 === 4.U, VecOp.vfsub32.U(7.W), VecOp.vfmul32.U(7.W)) | inst(25).asUInt,
+    Cat(inst(25), funct3, customIndex))
   val unary = vecOp === VecOp.vunary.U
   val selector = inst(19, 15)
   val reduction = unary && (selector === VecOp.uFredSum.U || selector === VecOp.uFredMax.U)
@@ -389,8 +378,13 @@ class DecodeUnit(p: XJParams) extends Module {
   val legacyFp = vecOp >= VecOp.vfadd.U && vecOp <= (VecOp.vmfle + 1).U
   val fp32UnaryCvt = vecOp >= VecOp.vfcvtF2I32.U && vecOp <= VecOp.vfcvtU2F32.U
   val unaryLegal = selector <= VecOp.uFredMax.U
-  val vecLegal = (vecOp <= VecOp.vunary.U && (!unary || unaryLegal)) ||
-    vectorMemory || fp32Reduction || (vecOp >= VecOp.vfadd32.U && vecOp <= VecOp.vfredmax32.U)
+  val removedVector = vecOp === VecOp.vfdiv.U || vecOp === (VecOp.vfdiv + 1).U ||
+    vecOp === VecOp.vfmacc.U || vecOp === (VecOp.vfmacc + 1).U ||
+    vecOp === VecOp.vfdiv32.U || vecOp === (VecOp.vfdiv32 + 1).U ||
+    vecOp === VecOp.vfmacc32.U || vecOp === (VecOp.vfmacc32 + 1).U ||
+    vecOp === VecOp.vfsqrt32.U
+  val vecLegal = !removedVector && ((vecOp <= VecOp.vunary.U && (!unary || unaryLegal)) ||
+    vectorMemory || fp32Reduction || (vecOp >= VecOp.vfadd32.U && vecOp <= VecOp.vfredmax32.U))
   when(customOpcode && !matrixDomain && vsetFunct === false.B && vecLegal) {
     legal := true.B
     io.out.op := UOpCode.VECTOR
