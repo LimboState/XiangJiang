@@ -187,10 +187,17 @@ object VectorFloat {
     Mux(x.isNaN, nan(24), Cat(a(15, 0), 0.U(16.W)))
   }
 
+  /** FP32 and BF16 share the sign/exponent layout and exponent range.
+    * RNE therefore needs only the discarded low half and a 16-bit increment,
+    * not normalization, exponent arithmetic and variable barrel shifters.
+    * This also handles subnormals, signed zero, exponent carry and overflow.
+    * Canonicalize NaNs before truncation (including payloads only in low bits).
+    */
   def narrow(a: UInt): UInt = {
-    val x = new Parts(a, 24)
-    val finite = round(Cat(x.normalized, 0.U(3.W)), x.exponent - 26.S(12.W), x.sign, 8)
-    Mux(x.isNaN, nan(8), Mux(x.isInf, infinity(x.sign, 8), finite))
+    val upper = a(31, 16)
+    val increment = a(15) && (a(14, 0).orR || upper(0))
+    val isNaN = a(30, 23).andR && a(22, 0).orR
+    Mux(isNaN, nan(8), upper + increment)
   }
 
   def fromInt(a: UInt): UInt = {

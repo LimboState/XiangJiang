@@ -92,6 +92,31 @@ BF16 矩阵 compute 时间从 23 增至 116 拍，**这是明显性能取舍，�
 上述为 lowering 指导，不是误差上界承诺。模型/数据类型/输入范围不同，迭代次数和
 异常处理必须单独验证；需要 IEEE 正确舍入或精确 fflags 时使用完整软件数学例程。
 
+## 第二轮：矩阵写回路径
+
+新报告 `timing_summary(1).rpt` 的 WNS 为 -4.018 ns、TNS 为 -5237.568 ns，
+setup 失败端点 10306 个。最差路径从 MatrixUnit 的 beat 寄存器，经 FP32→BF16
+转换与存储仲裁，到 DTCM BRAM DIN：13.472 ns、48 级逻辑，其中估计连线
+11.150 ns（82.8%）。三个 setup 路径是同一逻辑到不同 DTCM bank，不是三个独立瓶颈。
+报告仍为 unplaced，不能把这一结果当作 post-route 签核。
+
+针对性改动：
+
+- `VectorFloat.narrow` 利用 FP32/BF16 相同的指数范围，改成固定低 16 bit
+  guard/sticky 检查与高 16 bit 加一：`increment = bit15 && (low15 != 0 || bit16)`。
+  移除不必要的规格化、指数调整和可变移位，保持 RNE、次正规数、正负零、
+  进位溢出和规范 NaN 语义。包括 payload 仅在低 16 位的 NaN 也不会误变成 Inf。
+- `MatrixUnit` 增加 `prepareMem` 和完整请求寄存器。地址、写使能、512-bit data、
+  64-bit mask 一起捕获，valid 发出后在反压下保持稳定。每个 load/store beat
+  增加 1 拍准备；BF16 tile 为 2 beat，INT8 ACC tile 为 4 beat。
+- flush 阻止请求/响应握手并丢弃尚未发送的请求；系统仍必须先排空已接受的事务，
+  不能把 flush 当成撤销已发生外部写入的手段。
+
+不改变 MMUL/MMACC compute 延迟，不增加指令裁剪，不使用放宽约束。
+`Bf16NarrowSpec` 检查全部 65536 个保留高半字在五个舍入边界的结果，另加 2000
+个随机输入；既有精确有理数参考测试继续运行。矩阵测试增加 beat 反压稳定性、
+准备/待发送状态 flush 及重启检查。
+
 ## Vivado 导出与签核
 
 ```bash

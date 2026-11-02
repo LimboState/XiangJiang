@@ -340,7 +340,7 @@ class MatrixUnit(p: XJParams) extends Module {
     val flush = Input(Bool())
   })
 
-  private val idle :: loadStore :: waitMem :: compute :: waitArray :: Nil = Enum(5)
+  private val idle :: prepareMem :: loadStore :: waitMem :: compute :: waitArray :: Nil = Enum(6)
   private val state = RegInit(idle)
   private val task = Reg(new MatrixTask(p))
   private val beat = Reg(UInt(2.W))
@@ -348,6 +348,9 @@ class MatrixUnit(p: XJParams) extends Module {
   private val base = Reg(UInt(32.W))
   private val pending = RegInit(false.B)
   private val storeBuf = Reg(Vec(4, UInt(512.W)))
+  // Isolate tile/beat selection and BF16 rounding from the DTCM arbitration
+  // and BRAM input path. Hold the entire request stable under backpressure.
+  private val memoryRequest = Reg(new MatrixBeatReq)
 
   val bf16Array = Module(new MatrixArray(bf16 = true))
   val int8Array0 = Module(new MatrixArray(bf16 = false))
@@ -432,13 +435,16 @@ class MatrixUnit(p: XJParams) extends Module {
     VectorFloat.narrow(storeBuf(Cat(beat, half.U)(1, 0))(32 * (local % 16) + 31, 32 * (local % 16)))
   }).asUInt
 
-  io.memResp.ready := state === waitMem
-  io.memReq.valid := state === loadStore
-  io.memReq.bits.addr := base + (beat << 6)
-  io.memReq.bits.write := task.op === MatOp.mstore
-  io.memReq.bits.data := Mux(task.op === MatOp.mstore,
-    Mux(selected === 0.U, storeDataBf16, storeBuf(beat)), 0.U)
-  io.memReq.bits.mask := "hffffffffffffffff".U(64.W)
+  io.memResp.ready := state === waitMem && !io.flush
+  io.memReq.valid := state === loadStore && !io.flush
+  io.memReq.bits := memoryRequest
+  when(state === prepareMem && !io.flush) {
+    memoryRequest.addr := base + (beat << 6)
+    memoryRequest.write := task.op === MatOp.mstore
+    memoryRequest.data := Mux(task.op === MatOp.mstore,
+      Mux(selected === 0.U, storeDataBf16, storeBuf(beat)), 0.U)
+    memoryRequest.mask := "hffffffffffffffff".U(64.W)
+  }
 
   for ((arr, idx) <- arrays.zipWithIndex) {
     arr.io.flush := io.flush
@@ -571,7 +577,7 @@ class MatrixUnit(p: XJParams) extends Module {
     when(nextOp === MatOp.mbarrier || nextOp === MatOp.mfence) {
       pending := true.B
     }.otherwise {
-      state := Mux(nextOp === MatOp.mload || nextOp === MatOp.mstore, loadStore, compute)
+      state := Mux(nextOp === MatOp.mload || nextOp === MatOp.mstore, prepareMem, compute)
     }
     when(writesA) {
       writerValid(nextUnit * 3.U + 0.U) := true.B
@@ -599,6 +605,7 @@ class MatrixUnit(p: XJParams) extends Module {
     when(state === compute) {
       when(startReady) { state := waitArray }
     }
+    when(state === prepareMem) { state := loadStore }
     when(state === loadStore) {
       when(io.memReq.fire) { state := waitMem }
     }
@@ -609,7 +616,7 @@ class MatrixUnit(p: XJParams) extends Module {
           state := idle
         }.otherwise {
           beat := beat + 1.U
-          state := loadStore
+          state := prepareMem
         }
       }
     }

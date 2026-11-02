@@ -60,7 +60,20 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
       var cycles = 0
       var memResponse: Option[BigInt] = None
       var tagCounter = 0
+      var heldRequest: Option[(BigInt, Boolean, BigInt, BigInt)] = None
       def tick(): Unit = {
+        // Exercise the registered request on every beat, including BF16
+        // packing and all four INT8 beats; no payload may change while stalled.
+        dut.io.memReq.ready.poke(cycles % 7 >= 4)
+        def payload = (dut.io.memReq.bits.addr.peek().litValue,
+          dut.io.memReq.bits.write.peek().litToBoolean,
+          dut.io.memReq.bits.data.peek().litValue, dut.io.memReq.bits.mask.peek().litValue)
+        heldRequest.foreach { previous =>
+          assert(dut.io.memReq.valid.peek().litToBoolean)
+          assert(payload == previous, "matrix request changed under backpressure")
+        }
+        heldRequest = if (dut.io.memReq.valid.peek().litToBoolean &&
+          !dut.io.memReq.ready.peek().litToBoolean) Some(payload) else None
         dut.io.memResp.valid.poke(memResponse.isDefined)
         dut.io.memResp.bits.data.poke(memResponse.getOrElse(BigInt(0)))
         val reqValid = dut.io.memReq.valid.peek().litToBoolean
@@ -320,6 +333,47 @@ class MatrixUnitSpec extends AnyFunSuite with ChiselSim {
         }
         assert(row == expected, s"post-flush INT8 row $i mismatch: $row != $expected")
       }
+    }
+  }
+
+  test("memory preparation and stalled requests flush without issuing a stale beat") {
+    simulate(new MatrixUnit(XJParams(bankBytes = 1024))) { d =>
+      d.io.flush.poke(false); d.io.publish.valid.poke(false)
+      d.io.task.valid.poke(false); d.io.memReq.ready.poke(false)
+      d.io.memResp.valid.poke(false); d.io.memResp.bits.data.poke(0)
+      d.io.task.bits.tag.slot.poke(0); d.io.task.bits.tag.generation.poke(0)
+      d.io.task.bits.unit.poke(1); d.io.task.bits.buffer.poke(0)
+      d.io.task.bits.op.poke(MatOp.mload); d.io.task.bits.addr.poke(64)
+      d.clock.step()
+      // Flush either before the request register fills or after it is stalled.
+      for (age <- Seq(0, 1, 4)) {
+        assert(d.io.task.ready.peek().litToBoolean)
+        d.io.task.valid.poke(true); d.clock.step(); d.io.task.valid.poke(false)
+        assert(!d.io.memReq.valid.peek().litToBoolean)
+        d.clock.step(age)
+        if (age > 0) {
+          assert(d.io.memReq.valid.peek().litToBoolean)
+          assert(d.io.memReq.bits.addr.peek().litValue == 64)
+        }
+        d.io.flush.poke(true); d.io.memReq.ready.poke(true)
+        assert(!d.io.memReq.valid.peek().litToBoolean)
+        d.clock.step(); d.io.flush.poke(false); d.clock.step(3)
+        assert(!d.io.memReq.valid.peek().litToBoolean)
+        assert(!d.io.busy.peek().litToBoolean)
+        assert(!d.io.done.peek().litToBoolean)
+        d.io.memReq.ready.poke(false)
+      }
+      // Restart, use a different address, then accept exactly one load beat.
+      d.io.task.bits.addr.poke(128); d.io.task.valid.poke(true)
+      d.clock.step(); d.io.task.valid.poke(false); d.clock.step()
+      assert(d.io.memReq.valid.peek().litToBoolean)
+      assert(d.io.memReq.bits.addr.peek().litValue == 128)
+      assert(!d.io.memReq.bits.write.peek().litToBoolean)
+      d.io.memReq.ready.poke(true); d.clock.step()
+      assert(!d.io.memReq.valid.peek().litToBoolean)
+      assert(d.io.memResp.ready.peek().litToBoolean)
+      d.io.memResp.valid.poke(true); d.clock.step(); d.io.memResp.valid.poke(false)
+      assert(d.io.done.peek().litToBoolean)
     }
   }
 
