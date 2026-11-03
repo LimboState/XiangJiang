@@ -21,8 +21,7 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
 
   def captureWakeup(entry: IssueEntry): IssueEntry = {
     val captured = WireDefault(entry)
-    for ((source, target) <- Seq(entry.src1 -> captured.src1, entry.src2 -> captured.src2,
-      entry.fsrc1 -> captured.fsrc1, entry.fsrc2 -> captured.fsrc2, entry.fsrc3 -> captured.fsrc3)) {
+    for ((source, target) <- Seq(entry.src1 -> captured.src1, entry.src2 -> captured.src2)) {
       when(!source.ready && io.wakeup.valid && !io.wakeup.bits.exception &&
         TagMatch(source.tag, io.wakeup.bits.tag)) {
         target.ready := true.B
@@ -53,19 +52,13 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
   for (i <- 0 until p.nIssue) {
     awakened(i) := captureWakeup(entries(i))
     val atHead = if (headOnly) io.head.valid && TagMatch(entries(i).uop.tag, io.head.bits) else true.B
-  val vectorReady = if (vectorEnabled) {
-    (!entries(i).uop.usesV1 || entries(i).vsrc1.ready) &&
-      (!entries(i).uop.usesV2 || entries(i).vsrc2.ready) &&
-      (!entries(i).uop.usesVOld || entries(i).vold.ready) &&
-      (!entries(i).uop.usesVMask || entries(i).vmask.ready)
-  } else true.B
-  val fReady = (!entries(i).uop.usesF1 || entries(i).fsrc1.ready) &&
-    (!entries(i).uop.usesF2 || entries(i).fsrc2.ready) &&
-    (!entries(i).uop.usesF3 || entries(i).fsrc3.ready)
-  // Wakeup is captured first; never forward the completion arbiter through
-  // age selection and an entire functional unit in the same cycle.
-  eligible(i) := valid(i) && entries(i).src1.ready && entries(i).src2.ready &&
-    fReady && vectorReady && atHead
+    val vectorReady = if (vectorEnabled) {
+      (!entries(i).uop.usesV1 || awakened(i).vsrc1.ready) &&
+        (!entries(i).uop.usesV2 || awakened(i).vsrc2.ready) &&
+        (!entries(i).uop.usesVOld || awakened(i).vold.ready) &&
+        (!entries(i).uop.usesVMask || awakened(i).vmask.ready)
+    } else true.B
+    eligible(i) := valid(i) && awakened(i).src1.ready && awakened(i).src2.ready && vectorReady && atHead
   }
 
   var found: Bool = false.B
@@ -79,7 +72,7 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
   }
   val selected = oldest
   io.issue.valid := !io.flush && found
-  io.issue.bits := entries(selected)
+  io.issue.bits := awakened(selected)
   io.dispatch.ready := !io.flush && !valid.asUInt.andR
   io.empty := !valid.asUInt.orR
   val freeIndex = Wire(UInt(indexBits.W))
@@ -89,9 +82,6 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
     when(valid(i)) {
       entries(i).src1 := awakened(i).src1
       entries(i).src2 := awakened(i).src2
-      entries(i).fsrc1 := awakened(i).fsrc1
-      entries(i).fsrc2 := awakened(i).fsrc2
-      entries(i).fsrc3 := awakened(i).fsrc3
       if (vectorEnabled) {
         entries(i).vsrc1 := awakened(i).vsrc1
         entries(i).vsrc2 := awakened(i).vsrc2

@@ -39,14 +39,13 @@ class MatrixDecodeSpec extends AnyFunSuite with ChiselSim {
       check(mmacc(2), MatOp.mmacc, FuType.matrix, false, false, unit = 2)
       check(mew(0), MatOp.mew, FuType.matrix, false, false)
       check(mtrans(0), MatOp.mtrans, FuType.matrix, false, false)
-      // MBARRIER/MFENCE are ordered memory tasks routed through the MemQ.
-      check(mfence, MatOp.mfence, FuType.mem, false, true, checkUnit = false)
-      check(mbarrier(17), MatOp.mbarrier, FuType.mem, false, true, checkUnit = false)
+      check(mwait(2), MatOp.mwait, FuType.matrix, false, true, unit = 2)
+      check(mfence, MatOp.mfence, FuType.system, false, true, checkUnit = false)
+      check(mbarrier(17), MatOp.mbarrier, FuType.system, false, true, checkUnit = false)
 
-      // Illegal matrix encodings remain illegal instructions, including the
-      // removed V1-era MWAIT.
+      // Illegal matrix encodings remain illegal instructions.
       for (bad <- Seq(msetmode(3, 0), msetmode(0, 1), mload(1, 3, 0), mmul(3),
-        mwait(2), BigInt(0x5b) | (4 << 25), BigInt(0x7b))) {
+        mwait(3), BigInt(0x5b) | (4 << 25))) {
         c.io.in.inst.poke(bad)
         c.io.out.exception.expect(true)
         c.io.out.cause.expect(FaultCode.illegal)

@@ -9,7 +9,7 @@ class InstructionTcm(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val enable = Input(Bool())
     val write = Input(Bool())
-    val word = Input(UInt(17.W))
+    val word = Input(UInt(log2Ceil(p.itcmBytes / 4).W))
     val data = Input(UInt(32.W))
     val mask = Input(UInt(4.W))
     val readData = Output(UInt(32.W))

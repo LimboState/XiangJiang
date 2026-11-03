@@ -22,6 +22,14 @@ class Frontend extends Module {
   val valid = RegInit(false.B)
   val pc = RegInit(0.U(32.W))
   val packet = Reg(new FetchPacket)
+  val epoch = RegInit(false.B)
+  val requestEpoch = Reg(Bool())
+  val requestPc = Reg(UInt(32.W))
+  // A single outstanding response owns these metadata registers. Invalidation
+  // does not free them: drain it before issuing another request, even across
+  // START/redirect. The sticky kill bit prevents epoch-wrap aliasing.
+  val killed = RegInit(false.B)
+  val invalidate = io.start || io.redirect.valid || io.stopRun
 
   io.request.valid := running && !paused && !pending && !valid && !io.stopRun
   io.request.bits := pc
@@ -30,12 +38,21 @@ class Frontend extends Module {
 
   when(io.request.fire) {
     pending := true.B
+    requestPc := pc
+    requestEpoch := epoch
+    killed := false.B
     pc := pc + 4.U
   }
-  when(io.response.valid && pending && running) {
-    packet := io.response.bits
-    valid := true.B
+  when(io.response.valid && pending) {
     pending := false.B
+    when(running && !killed && !invalidate && requestEpoch === epoch && io.response.bits.pc === requestPc) {
+      packet := io.response.bits
+      valid := true.B
+    }
+  }
+  when(invalidate) {
+    epoch := !epoch
+    when(pending) { killed := true.B }
   }
   when(io.fetch.fire) {
     valid := false.B
@@ -47,19 +64,16 @@ class Frontend extends Module {
     pc := io.redirect.bits
     paused := false.B
     valid := false.B
-    pending := false.B
   }
   when(io.start) {
     running := true.B
     paused := false.B
-    pending := false.B
     valid := false.B
     pc := 0.U
   }
   when(io.stopRun) {
     running := false.B
     valid := false.B
-    pending := false.B
     paused := false.B
   }
 }

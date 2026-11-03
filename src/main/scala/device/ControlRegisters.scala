@@ -10,7 +10,6 @@ class ControlRegisters(p: XJParams) extends Module {
     val axi = new AxiLiteSlave
     val status = Input(new CoreStatus)
     val hostIdle = Input(Bool())
-    val dmaStatus = Input(new DmaCompletion)
     val start = Output(Bool())
     val ack = Output(Bool())
     val debugRegs = Input(Vec(32, UInt(32.W)))
@@ -33,8 +32,9 @@ class ControlRegisters(p: XJParams) extends Module {
   io.ack := false.B
   val requestStart = w.strb(0) && w.data(0)
   val requestAck = w.strb(0) && w.data(1)
-  val allowedStart = !io.status.busy && !io.status.done && !io.status.fault && io.hostIdle
-  val allowedAck = !io.status.busy
+  val allowedStart = !io.status.busy && !io.status.done && !io.status.fault &&
+    !io.status.dma.poisoned && io.hostIdle
+  val allowedAck = !io.status.busy && !io.status.dma.poisoned
   val writeError = aw.addr =/= 0.U ||
     (requestStart && requestAck) || (requestStart && !allowedStart) ||
     (requestAck && !allowedAck)
@@ -69,13 +69,18 @@ class ControlRegisters(p: XJParams) extends Module {
     is("h24".U) { readData := p.nXRes.U }
     is("h28".U) { readData := p.nMemq.U }
     is("h2c".U) { readData := p.nIssue.U }
-    is("h30".U) { readData := 1.U }
-    is("h34".U) { readData := Cat(io.dmaStatus.partial, io.dmaStatus.cause) }
-    is("h38".U) { readData := io.dmaStatus.address }
-    is("h3c".U) { readData := io.dmaStatus.bytesCompleted(31, 0) }
-    is("h40".U) { readData := io.dmaStatus.bytesCompleted(63, 32) }
+    is("h30".U) { readData := 2.U }
+    is("h34".U) { readData := io.status.faultDetail }
+    is("h38".U) { readData := io.status.dma.rowBytes }
+    is("h3c".U) { readData := io.status.dma.rows }
+    is("h40".U) { readData := io.status.dma.externalStride }
+    is("h44".U) { readData := io.status.dma.localStride }
+    is("h48".U) { readData := io.status.dma.bytesDone }
+    is("h4c".U) { readData := io.status.dma.rowsDone }
+    is("h50".U) { readData := Cat(io.status.dma.poisoned, io.status.dma.error,
+      io.status.dma.outbound, io.status.dma.active) }
   }
-  known := address <= "h40".U || (address >= "h100".U && address <= "h17c".U)
+  known := address <= "h50".U || (address >= "h100".U && address <= "h17c".U)
   when(address >= "h100".U && address <= "h17c".U) {
     readData := io.debugRegs(address(6, 2))
   }

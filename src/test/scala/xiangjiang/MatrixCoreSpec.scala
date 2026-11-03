@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Test-side matrix encodings, consistent with docs/XJ-ISA-Support.md. */
+/** Test-side matrix encodings from docs/xj-isa.md. */
 object MatrixEncoding {
   def msetmode(unit: Int, mode: Int): BigInt =
     ((mode & 1) << 20) | ((unit & 3) << 12) | 0x2b
@@ -16,7 +16,6 @@ object MatrixEncoding {
   def mmacc(unit: Int): BigInt = (BigInt(1) << 25) | ((unit & 3) << 12) | 0x5b
   def mew(unit: Int): BigInt = (BigInt(2) << 25) | ((unit & 3) << 12) | 0x5b
   def mtrans(unit: Int): BigInt = (BigInt(3) << 25) | ((unit & 3) << 12) | 0x5b
-  // V1-era MWAIT: no longer part of XJ-NPU; the encoding is illegal.
   def mwait(unit: Int): BigInt = (BigInt(unit & 3) << 30) | 0x7b
   def mfence: BigInt = (BigInt(1) << 12) | 0x7b
   def mbarrier(id: Int): BigInt = (BigInt(id & 31) << 27) | (BigInt(2) << 12) | 0x7b
@@ -25,8 +24,8 @@ object MatrixEncoding {
 class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
   private val wordMask = (BigInt(1) << 32) - 1
 
-  test("matrix programs decode, order, compute and store complete 8x8 tiles through DTCM") {
-    val p = XJParams(nRob = 8, nIssue = 2, nXRes = 3, nMemq = 4,
+  test("matrix programs decode, order, compute and store complete tiles through DTCM") {
+    val p = XJParams(nRob = 8, nIssue = 2, nXRes = 3, nMemq = 3,
       generationBits = 1, seqBits = 6, bankBytes = 1024, nVRes = 2)
     simulate(new ScalarCore(p)) { dut =>
       import Rv32._
@@ -37,22 +36,17 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         for ((x, i) <- values.zipWithIndex) data |= (BigInt(x & 0xff) << (8 * i))
         for (i <- 0 until 64) bytes(address + i) = ((data >> (8 * i)) & 255).toInt
       }
-      def put16(address: Long, values: Seq[Int]): Unit = {
-        var data = BigInt(0)
-        for ((x, i) <- values.zipWithIndex) data |= (BigInt(x & 0xffff) << (16 * i))
-        for (i <- 0 until 64) bytes(address + i) = ((data >> (8 * i)) & 255).toInt
-      }
       def get64(address: Long): BigInt = (0 until 64).foldLeft(BigInt(0)) { (v, i) =>
         v | (BigInt(bytes.getOrElse(address + i, 0)) << (8 * i))
       }
       def get32s(address: Long, count: Int): Seq[Int] = {
-        val data = get64(address)
-        (0 until count).map(i => ((data >> (32 * i)) & wordMask).toInt)
+        (0 until count).map(i => ((get64(address + i * 4) & wordMask)).toInt)
       }
       var program = Seq.empty[BigInt]
       var cycles = 0
       var matrixResponse: Option[BigInt] = None
       var scalarResponse: Option[(Int, BigInt, Boolean)] = None
+      val requests = scala.collection.mutable.ArrayBuffer.empty[(Long, Boolean, BigInt, Int)]
       val commits = scala.collection.mutable.ArrayBuffer.empty[Int]
 
       dut.io.start.poke(false); dut.io.ack.poke(false)
@@ -75,10 +69,10 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
 
         val fetch = if (dut.io.fetchReq.valid.peek().litToBoolean)
           Some(dut.io.fetchReq.bits.peek().litValue.toInt) else None
-        if (dut.io.retire.valid.peek().litToBoolean &&
-          !dut.io.retire.bits.exception.peek().litToBoolean)
+        if (dut.io.retire.valid.peek().litToBoolean)
           commits += dut.io.retire.bits.uop.pc.peek().litValue.toInt
 
+        // Scalar word requests (unused by the pure matrix program).
         if (scalarResponse.exists(_._1 == 0) && dut.io.dataResp.ready.peek().litToBoolean)
           scalarResponse = None
         if (dut.io.dataReq.valid.peek().litToBoolean && dut.io.dataReq.ready.peek().litToBoolean) {
@@ -87,6 +81,7 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
           val store = dut.io.dataReq.bits.write.peek().litToBoolean
           val data = dut.io.dataReq.bits.data.peek().litValue
           val mask = dut.io.dataReq.bits.mask.peek().litValue.toInt
+          requests += ((addr, store, data, mask))
           if (store)
             for (i <- 0 until 4 if ((mask >> i) & 1) != 0)
               bytes(addr + i) = ((data >> (i * 8)) & 255).toInt
@@ -96,6 +91,7 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
           scalarResponse = Some((3, read, false))
         }
 
+        // Matrix 64-byte beats.
         val mValid = dut.io.matrixReq.valid.peek().litToBoolean
         val mReady = dut.io.matrixReq.ready.peek().litToBoolean
         if (mValid && mReady) {
@@ -132,7 +128,7 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         if (dut.io.status.done.peek().litToBoolean || dut.io.status.fault.peek().litToBoolean) {
           dut.io.ack.poke(true); tick(); dut.io.ack.poke(false)
         }
-        program = words; commits.clear()
+        program = words; requests.clear(); commits.clear()
         dut.io.start.poke(true); tick(); dut.io.start.poke(false)
         val deadline = cycles + 40000
         while (dut.io.status.busy.peek().litToBoolean && cycles < deadline) tick()
@@ -145,99 +141,51 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         assert(matrixResponse.isEmpty)
       }
 
-      // INT8 8x8 matrix multiply: A in [-3, 3], B in [-2, 2].
       val a = Array.tabulate(8, 8) { (i, j) => ((i * 8 + j) % 7) - 3 }
       val b = Array.tabulate(8, 8) { (k, j) => ((k * 8 + j) % 5) - 2 }
       val c = Array.tabulate(8, 8) { (i, j) =>
         (0 until 8).map(k => a(i)(k) * b(k)(j)).sum
       }
-      put8(0L, a.flatten.toSeq.map(_ & 0xff))
-      put8(64L, b.flatten.toSeq.map(_ & 0xff))
+      put8(0, a.toSeq.flatMap(_.toSeq))
+      put8(256, b.toSeq.flatMap(_.toSeq))
+      // Runtime state faults and complete footprint prechecks must issue no beat.
+      run(Seq(mmul(2), halt), 14)
+      dut.io.status.faultCause.expect(14)
+      run(Seq(addi(1, 0, -1), mload(1, 0, 1), halt), 12)
+      dut.io.status.faultCause.expect(12)
+      run(Seq(addi(1, 0, -64), mload(1, 0, 1), halt), 13)
+      dut.io.status.faultCause.expect(13)
 
       run(Seq(
-        addi(1, 0, 0), addi(2, 0, 64), addi(3, 0, 128),
+        addi(1, 0, 0), addi(2, 0, 256), addi(3, 0, 512),
         msetmode(1, 0),
         mload(1, 0, 1),
         mload(1, 1, 2),
         mmul(1),
+        mwait(1),
         mstore(1, 3),
         mfence,
         halt))
 
       for (i <- 0 until 8) {
-        val beat = i / 2
-        val local = i % 2
-        val row = get32s(128L + beat * 64L + local * 32L, 8)
+        val row = get32s(512L + i * 32L, 8)
         assert(row == c(i).toSeq, s"INT8 row $i mismatch: $row != ${c(i).toSeq}")
       }
 
-      // WS mode on the INT8 unit: software-visible result is still A x B.
+      // A second run reuses the loaded mode and produces a fresh result.
       run(Seq(
-        addi(1, 0, 0), addi(2, 0, 64), addi(3, 0, 256),
-        msetmode(1, 1),
+        addi(1, 0, 0), addi(2, 0, 256), addi(3, 0, 1024),
         mload(1, 0, 1),
         mload(1, 1, 2),
         mmul(1),
+        mwait(1),
         mstore(1, 3),
         mfence,
         halt))
       for (i <- 0 until 8) {
-        val beat = i / 2
-        val local = i % 2
-        val row = get32s(256L + beat * 64L + local * 32L, 8)
-        assert(row == c(i).toSeq, s"WS-mode INT8 row $i mismatch: $row != ${c(i).toSeq}")
+        val row = get32s(1024L + i * 32L, 8)
+        assert(row == c(i).toSeq, s"second INT8 row $i mismatch: $row != ${c(i).toSeq}")
       }
-
-      // BF16 MMUL with diagonal operands.
-      val bfA = Array.tabulate(8, 8) { (i, j) => if (i == j) 0x3f80 else 0 }
-      val bfB = Array.tabulate(8, 8) { (i, j) => if (i == j) 0x4000 else 0 }
-      for (beat <- 0 until 2) {
-        put16(beat * 64L, (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 8).map(col => bfA(r)(col))
-        })
-      }
-      for (beat <- 0 until 2) {
-        put16(128L + beat * 64L, (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 8).map(col => bfB(r)(col))
-        })
-      }
-      run(Seq(
-        addi(1, 0, 0), addi(2, 0, 128), addi(3, 0, 256),
-        mload(0, 0, 1),
-        mload(0, 1, 2),
-        mmul(0),
-        mstore(0, 3),
-        mfence,
-        halt))
-      for (beat <- 0 until 2) {
-        val data = get64(256L + beat * 64L)
-        val got = (0 until 32).map(i => ((data >> (16 * i)) & 0xffff).toInt)
-        val expected = (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 8).map(col => if (r == col) 0x4000 else 0)
-        }
-        assert(got == expected, s"BF16 MMUL beat $beat mismatch: $got != $expected")
-      }
-
-      // MLOAD.ACC + MMACC accumulates on the committed accumulator.
-      run(Seq(
-        addi(1, 0, 256), addi(2, 0, 0), addi(3, 0, 128),
-        mload(0, 2, 1),
-        mmacc(0),
-        mstore(0, 3),
-        mfence,
-        halt))
-      for (beat <- 0 until 2) {
-        val data = get64(128L + beat * 64L)
-        val got = (0 until 32).map(i => ((data >> (16 * i)) & 0xffff).toInt)
-        val expected = (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 8).map(col => if (r == col) 0x4080 else 0)
-        }
-        assert(got == expected, s"BF16 MMACC beat $beat mismatch: $got != $expected")
-      }
-
-      // MBARRIER orders matrix tasks; MWAIT is illegal in the new ISA.
-      run(Seq(addi(1, 0, 0), mbarrier(0), mfence, halt))
-      run(Seq(mwait(1), halt), fault = FaultCode.illegal.litValue.toInt)
     }
   }
 }
