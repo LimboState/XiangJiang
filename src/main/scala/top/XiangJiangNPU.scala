@@ -10,10 +10,11 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   val io = IO(new Bundle {
     val control = new AxiLiteSlave
     val memory = new Axi4Slave(p.axiIdBits)
+    val external = Flipped(new Axi4Slave(p.axiIdBits))
     val status = Output(new CoreStatus)
     val retire = Output(Valid(new CommitRecord(p)))
     val debugRegs = Output(Vec(32, UInt(32.W)))
-    val debugVRegs = Output(Vec(32, UInt(512.W)))
+    val debugVRegs = Output(Vec(32, UInt(p.vectorBits.W)))
   })
 
   val core = Module(new ScalarCore(p))
@@ -21,12 +22,14 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   val control = Module(new ControlRegisters(p))
   io.control <> control.io.axi
   io.memory <> tcm.io.axi
+  io.external <> core.io.external
   control.io.status := core.io.status
   control.io.hostIdle := tcm.io.hostIdle
   control.io.debugRegs := core.io.debugRegs
   core.io.start := control.io.start
   core.io.ack := control.io.ack
   tcm.io.coreBusy := core.io.status.busy
+  tcm.io.busPoisoned := core.io.status.dma.poisoned
   tcm.io.fetchReq <> core.io.fetchReq
   core.io.fetchResp := tcm.io.fetchResp
   tcm.io.dataReq <> core.io.dataReq

@@ -7,11 +7,11 @@ object UOpCode extends ChiselEnum {
   val ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU,
       ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU,
       LUI, AUIPC, LW, SW, BEQ, BNE, BLT, BGE, BLTU, BGEU,
-      JAL, JALR, FENCE, HALT, VECTOR, MATRIX = Value
+      JAL, JALR, FENCE, HALT, VECTOR, MATRIX, DSETSIZE, DSETSTRIDE, MVIN, MVOUT = Value
 }
 
 object FuType extends ChiselEnum {
-  val alu, mem, bru, system, vector, matrix = Value
+  val alu, mem, bru, system, vector, matrix, dmaConfig = Value
 }
 
 /** Matrix ISA operation identifiers.  MLOAD/MSTORE are memory-class tasks,
@@ -32,22 +32,21 @@ object FaultCode {
   val loadAccess = 5.U(4.W)
   val storeAlign = 6.U(4.W)
   val storeAccess = 7.U(4.W)
-  // Matrix faults are intentionally distinct from scalar load/store codes.
-  val matrixLoadAlign = 8.U(4.W)
-  val matrixLoadAccess = 9.U(4.W)
-  val matrixStoreAlign = 10.U(4.W)
-  val matrixStoreAccess = 11.U(4.W)
+  val vectorLoadAlign = 8.U(4.W)
+  val vectorLoadAccess = 9.U(4.W)
+  val vectorStoreAlign = 10.U(4.W)
+  val vectorStoreAccess = 11.U(4.W)
+  val matrixAlign = 12.U(4.W)
+  val matrixAccess = 13.U(4.W)
+  val matrixState = 14.U(4.W)
+  val dmaConfig = 15.U(5.W)
+  val dmaRead = 16.U(5.W)
+  val dmaWrite = 17.U(5.W)
+  val dmaProtocol = 18.U(5.W)
 }
 
-/** Implementation-defined vector operation identifiers.
-  *
-  * The vector encoding is intentionally not RVV-compatible.  The low two bits
-  * of the identifier select one of four vector opcodes, bit 2..4 form funct3,
-  * and the remaining bit is inst[25].  For the paired arithmetic, logical,
-  * comparison and floating-point operations an even identifier is the
-  * vector-vector form and an odd identifier is the vector-scalar form.
-  * Permutation, conversion, reduction, special-function and memory identifiers
-  * are standalone.
+/** Internal execution identifiers, not machine encodings. Paired operations
+  * use even/odd identifiers for vv/vx; DecodeUnit translates XJ-ISA funct6.
   */
 object VecOp {
   val vadd = 0
@@ -88,19 +87,14 @@ object VecOp {
   val vunary = 58
   val vle32 = 59
   val vse32 = 60
-  val vle16 = 61
-  val vse16 = 62
+  val fredsum = 61
+  val fredmax = 62
 
-  // Selector values carried in rs1 for VecOp.vunary.
+  // Internal conversion selector (MicroOp.vecUnary), not an architectural source.
   val uWiden = 0
   val uNarrow = 1
   val uIntToFloat = 2
   val uFloatToInt = 3
-  val uFredSum = 4
-  val uFredMax = 5
-  val uExp = 6
-  val uRcp = 7
-  val uRsqrt = 8
 }
 
 class RobTag(p: XJParams) extends Bundle {
@@ -120,6 +114,7 @@ class MicroOp(p: XJParams) extends Bundle {
   val usesRs2 = Bool()
   val writesRd = Bool()
   val vecOp = UInt(6.W)
+  val vecUnary = UInt(2.W)
   val writesV = Bool()
   val usesV1 = Bool()
   val usesV2 = Bool()
@@ -136,7 +131,7 @@ class MicroOp(p: XJParams) extends Bundle {
   val matId = UInt(5.W)
   val barrier = Bool()
   val exception = Bool()
-  val cause = UInt(4.W)
+  val cause = UInt(5.W)
   val badAddr = UInt(32.W)
   val tag = new RobTag(p)
   val seq = UInt(p.seqBits.W)
@@ -150,7 +145,7 @@ class Operand(p: XJParams) extends Bundle {
 
 class VectorOperand(p: XJParams) extends Bundle {
   val ready = Bool()
-  val value = UInt(512.W)
+  val value = UInt(p.vectorBits.W)
   val tag = new RobTag(p)
 }
 
@@ -167,19 +162,21 @@ class IssueEntry(p: XJParams) extends Bundle {
 class ExeResult(p: XJParams) extends Bundle {
   val tag = new RobTag(p)
   val seq = UInt(p.seqBits.W)
-  val data = UInt(512.W)
+  val data = UInt(p.vectorBits.W)
   val exception = Bool()
-  val cause = UInt(4.W)
+  val cause = UInt(5.W)
   val badAddr = UInt(32.W)
+  val detail = UInt(32.W)
   val nextPc = UInt(32.W)
 }
 
 class CommitRecord(p: XJParams) extends Bundle {
   val uop = new MicroOp(p)
-  val data = UInt(512.W)
+  val data = UInt(p.vectorBits.W)
   val exception = Bool()
-  val cause = UInt(4.W)
+  val cause = UInt(5.W)
   val badAddr = UInt(32.W)
+  val detail = UInt(32.W)
   val nextPc = UInt(32.W)
 }
 
@@ -203,10 +200,12 @@ class MatrixBeatReq extends Bundle {
 
 class MatrixBeatResp extends Bundle {
   val data = UInt(512.W)
+  val error = Bool()
 }
 
 /** Parameters for one ordered matrix task handed from LSU to MatrixUnit. */
-class MatrixTask extends Bundle {
+class MatrixTask(p: XJParams) extends Bundle {
+  val tag = new RobTag(p)
   val op = MatOp()
   val unit = UInt(2.W)
   val buffer = UInt(2.W)
@@ -237,8 +236,23 @@ class CoreStatus extends Bundle {
   val fault = Bool()
   val faultPc = UInt(32.W)
   val faultInst = UInt(32.W)
-  val faultCause = UInt(4.W)
+  val faultCause = UInt(5.W)
   val faultAddr = UInt(32.W)
+  val faultDetail = UInt(32.W)
+  val dma = new DmaStatus
+}
+
+class DmaStatus extends Bundle {
+  val rowBytes = UInt(32.W)
+  val rows = UInt(32.W)
+  val externalStride = UInt(32.W)
+  val localStride = UInt(32.W)
+  val bytesDone = UInt(32.W)
+  val rowsDone = UInt(32.W)
+  val active = Bool()
+  val outbound = Bool()
+  val error = Bool()
+  val poisoned = Bool()
 }
 
 object TagMatch {

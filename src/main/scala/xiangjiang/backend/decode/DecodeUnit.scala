@@ -89,19 +89,14 @@ class DecodeUnit(p: XJParams) extends Module {
   when(opcode === "h0f".U && funct3 === 0.U) {
     decode(UOpCode.FENCE, FuType.system, false, false, false, 0.U, false)
   }
-  // Only the exact custom-0 word is HALT.  Every other custom-0 encoding,
-  // including the all-zero word, is illegal.
+  // HALT is an exact word; the remaining custom-0 space is checked below.
   when(inst === "h0000000b".U) {
     decode(UOpCode.HALT, FuType.system, false, false, false, 0.U, false)
   }
 
-  // Matrix instructions own custom-1/custom-2/custom-3 with funct3 <= 3.
-  // Vector uses OP-V and the unused AMO opcode for its fourth group so that
-  // custom-1/custom-3 only carry vector encodings in funct3 4..7.
-  val matrixDomain = opcode === "h5b".U ||
-    ((opcode === "h2b".U || opcode === "h7b".U) && funct3 <= 3.U)
+  val matrixDomain = opcode === "h5b".U || opcode === "h2b".U || opcode === "h7b".U
   val matUnitField = funct3(1, 0)
-  val matUnitLegal = matUnitField =/= 3.U
+  val matUnitLegal = funct3 <= 2.U
   def decodeMatrix(matOp: MatOp.Type, fu: FuType.Type, rs1: Boolean,
                    barrier: Boolean): Unit = {
     legal := true.B
@@ -160,42 +155,67 @@ class DecodeUnit(p: XJParams) extends Module {
     }
   }
 
-  // Vector opcodes deliberately use OP-V and three otherwise-unused major
-  // opcodes (LOAD-FP, STORE-FP, AMO).  custom-1/custom-2/custom-3 are owned
-  // by the matrix domain, and custom-0 is reserved for the exact HALT word.
-  val customOpcode = opcode === "h57".U || opcode === "h07".U ||
-    opcode === "h27".U || opcode === "h2f".U
-  val customIndex = MuxLookup(opcode, 0.U(2.W))(Seq(
-    "h57".U -> 0.U, "h07".U -> 1.U, "h27".U -> 2.U, "h2f".U -> 3.U))
-  val vecOp = Cat(inst(25), funct3, customIndex)
-  val unary = vecOp === VecOp.vunary.U
-  val selector = inst(19, 15)
-  val reduction = unary && (selector === VecOp.uFredSum.U || selector === VecOp.uFredMax.U)
-  val vectorMemory = vecOp >= VecOp.vle32.U && vecOp <= VecOp.vse16.U
-  val vectorStore = vecOp === VecOp.vse32.U || vecOp === VecOp.vse16.U
-  val merge = vecOp === VecOp.vmerge.U
-  val unaryLegal = selector <= VecOp.uRsqrt.U
-  when(customOpcode && !matrixDomain && vecOp =/= 63.U && (!unary || unaryLegal) && (!merge || !inst(26))) {
+  // XJ-V: funct6 selects the operation, funct3 the operand form, vm=inst[25].
+  val f6 = inst(31, 26)
+  val paired = f6 <= "h11".U || (f6 >= "h1b".U && f6 <= "h22".U)
+  val unary = f6 >= "h12".U && f6 <= "h15".U
+  val slide = f6 === "h16".U || f6 === "h17".U
+  val reduction = f6 === "h19".U || f6 === "h1a".U
+  val merge = f6 === "h23".U
+  val vectorLegal = (paired && (funct3 === 0.U || funct3 === 4.U)) ||
+    (unary && funct3 === 2.U && inst(19, 15) === 0.U) ||
+    (slide && (funct3 === 4.U || funct3 === 3.U)) ||
+    (f6 === "h18".U && funct3 === 0.U) ||
+    (reduction && funct3 === 1.U) || (merge && funct3 === 0.U && !inst(25))
+  when(opcode === "h57".U && vectorLegal) {
     legal := true.B
     io.out.op := UOpCode.VECTOR
-    io.out.fu := Mux(vectorMemory, FuType.mem, FuType.vector)
-    io.out.vecOp := vecOp
-    io.out.unmasked := inst(26)
-    io.out.maskReg := inst(31, 27)
-    io.out.usesRs1 := (vecOp < VecOp.vslideup.U && vecOp(0)) ||
-      vecOp === VecOp.vslideup.U || vecOp === VecOp.vslidedown.U || vectorMemory
-    io.out.usesV1 := (vecOp < VecOp.vslideup.U && !vecOp(0)) || merge || vecOp === VecOp.vrgather.U
-    io.out.usesV2 := !vectorMemory
-    io.out.usesVMask := !inst(26)
-    io.out.usesVOld := vectorStore || (!reduction && !merge &&
-      (!inst(26) || (vecOp >= VecOp.vmseq.U && vecOp <= VecOp.vmfle.U) ||
-        vecOp === VecOp.vfmacc.U || vecOp === (VecOp.vfmacc + 1).U))
-    io.out.writesV := !vectorStore && !reduction
-    destination := reduction
-    io.out.imm := Mux(vectorMemory,
-      Cat(Fill(27, inst(24)), inst(24, 20)), Cat(0.U(27.W), selector))
-    io.out.useImm := vectorMemory || vecOp === VecOp.vslideupImm.U ||
-      vecOp === VecOp.vslidedownImm.U
+    io.out.fu := FuType.vector
+    io.out.vecOp := Mux(f6 <= "h11".U, (f6 << 1) + (funct3 === 4.U),
+      Mux(f6 >= "h1b".U && f6 <= "h22".U,
+        VecOp.vmseq.U + ((f6 - "h1b".U) << 1) + (funct3 === 4.U),
+        MuxLookup(f6, VecOp.vunary.U)(Seq(
+          "h16".U -> Mux(funct3 === 3.U, VecOp.vslideupImm.U, VecOp.vslideup.U),
+          "h17".U -> Mux(funct3 === 3.U, VecOp.vslidedownImm.U, VecOp.vslidedown.U),
+          "h18".U -> VecOp.vrgather.U, "h19".U -> VecOp.fredsum.U,
+          "h1a".U -> VecOp.fredmax.U, "h23".U -> VecOp.vmerge.U))))
+    io.out.vecUnary := f6 - "h12".U
+    io.out.unmasked := inst(25)
+    io.out.maskReg := 0.U
+    io.out.usesRs1 := funct3 === 4.U
+    io.out.usesV1 := funct3 === 0.U || reduction
+    io.out.usesV2 := true.B
+    io.out.usesVMask := !inst(25)
+    io.out.usesVOld := reduction || (!merge && (!inst(25) || f6 === "h0f".U))
+    io.out.writesV := true.B
+    io.out.imm := Cat(0.U(27.W), inst(19, 15))
+    io.out.useImm := slide && funct3 === 3.U
+  }
+  // Unmasked whole-register transfers; VST's source is inst[24:20], not rd.
+  when(opcode === "h0b".U && (funct3 === 1.U || funct3 === 2.U)) {
+    val store = funct3 === 2.U
+    legal := true.B
+    io.out.op := UOpCode.VECTOR
+    io.out.fu := FuType.mem
+    io.out.vecOp := Mux(store, VecOp.vse32.U, VecOp.vle32.U)
+    io.out.usesRs1 := true.B
+    io.out.usesVOld := store
+    io.out.writesV := !store
+    io.out.unmasked := true.B
+    io.out.imm := Mux(store, immS, immI)
+    io.out.useImm := true.B
+  }
+
+  when(opcode === "h0b".U && funct7 === 0.U && inst(11, 7) === 0.U &&
+    funct3 >= 3.U && funct3 <= 6.U) {
+    val config = funct3 <= 4.U
+    legal := true.B
+    io.out.op := MuxLookup(funct3, UOpCode.MVIN)(Seq(
+      3.U -> UOpCode.DSETSIZE, 4.U -> UOpCode.DSETSTRIDE,
+      5.U -> UOpCode.MVIN, 6.U -> UOpCode.MVOUT))
+    io.out.fu := Mux(config, FuType.dmaConfig, FuType.mem)
+    io.out.usesRs1 := true.B
+    io.out.usesRs2 := true.B
   }
 
   io.out.exception := io.in.exception || !legal
@@ -203,7 +223,8 @@ class DecodeUnit(p: XJParams) extends Module {
     Mux(!legal, FaultCode.illegal, FaultCode.none))
   io.out.badAddr := Mux(io.in.exception, io.in.badAddr, Mux(!legal, inst, 0.U))
   io.out.writesRd := destination && io.out.rd =/= 0.U && !io.out.exception
-  io.out.barrier := io.out.fu === FuType.bru || io.out.fu === FuType.system || io.out.exception
+  io.out.barrier := io.out.fu === FuType.bru || io.out.fu === FuType.system || io.out.fu === FuType.dmaConfig ||
+    (io.out.op === UOpCode.MATRIX && io.out.matOp === MatOp.mwait) || io.out.exception
   when(io.out.exception) {
     io.out.usesRs1 := false.B
     io.out.usesRs2 := false.B

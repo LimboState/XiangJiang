@@ -12,8 +12,12 @@ class LSU(p: XJParams) extends Module {
     val head = Input(Valid(new RobTag(p)))
     val request = Decoupled(new WordReq)
     val response = Flipped(Decoupled(new WordResp))
-    val matrixTask = Decoupled(new MatrixTask)
+    val dmaTask = Decoupled(new IssueEntry(p))
+    val dmaResult = Flipped(Decoupled(new ExeResult(p)))
+    val matrixTask = Decoupled(new MatrixTask(p))
     val matrixDone = Input(Bool())
+    val matrixStateFault = Input(Bool())
+    val matrixAccessFault = Input(Bool())
     val result = Decoupled(new ExeResult(p))
     val stop = Input(Bool())
     val flush = Input(Bool())
@@ -35,26 +39,25 @@ class LSU(p: XJParams) extends Module {
   val active = RegInit(false.B)
   val vectorRunning = RegInit(false.B)
   val matrixRunning = RegInit(false.B)
-  val pendingLanes = Reg(UInt(16.W))
-  val loadData = Reg(Vec(16, UInt(32.W)))
+  val dmaRunning = RegInit(false.B)
+  val pendingLanes = Reg(UInt(8.W))
+  val loadData = Reg(Vec(8, UInt(32.W)))
   val blocked = RegInit(false.B)
   val resultValid = RegInit(false.B)
   val result = Reg(new ExeResult(p))
   def increment(x: UInt): UInt = Mux(x === (p.nMemq - 1).U, 0.U, x + 1.U)
+  def isDma(uop: MicroOp): Bool = uop.op === UOpCode.MVIN || uop.op === UOpCode.MVOUT
   def isVector(uop: MicroOp): Bool = uop.op === UOpCode.VECTOR
   def isMatrix(uop: MicroOp): Bool = uop.op === UOpCode.MATRIX
   def isMatrixMem(uop: MicroOp): Bool = isMatrix(uop) &&
     (uop.matOp === MatOp.mload || uop.matOp === MatOp.mstore)
   def isStore(uop: MicroOp): Bool = uop.op === UOpCode.SW ||
-    (isVector(uop) && (uop.vecOp === VecOp.vse32.U || uop.vecOp === VecOp.vse16.U)) ||
+    (isVector(uop) && uop.vecOp === VecOp.vse32.U) ||
     (isMatrix(uop) && uop.matOp === MatOp.mstore)
-  def isVectorHalf(uop: MicroOp): Bool = isVector(uop) &&
-    (uop.vecOp === VecOp.vse16.U || uop.vecOp === VecOp.vle16.U)
-  def laneMask(entry: IssueEntry): UInt = Mux(entry.uop.unmasked, "hffff".U(16.W), entry.vmask.value(15, 0))
 
   io.allocate.ready := count < p.nMemq.U && !io.stop && !io.flush && !blocked
-  io.empty := count === 0.U && !active && !vectorRunning && !matrixRunning && !resultValid
-  io.quiescent := !active && !vectorRunning && !matrixRunning && !resultValid
+  io.empty := count === 0.U && !active && !vectorRunning && !matrixRunning && !dmaRunning && !resultValid
+  io.quiescent := !active && !vectorRunning && !matrixRunning && !dmaRunning && !resultValid
   io.result.valid := resultValid
   io.result.bits := result
 
@@ -104,7 +107,6 @@ class LSU(p: XJParams) extends Module {
   val effectiveAddress = (aguEntry.src1.value + aguEntry.uop.imm)(31, 0)
   val aguStore = isStore(aguEntry.uop)
   val aguVector = isVector(aguEntry.uop)
-  val aguHalf = isVectorHalf(aguEntry.uop)
   val aguMatrix = isMatrix(aguEntry.uop)
   val aguMatrixMem = isMatrixMem(aguEntry.uop)
   val alignCause = Mux(aguStore, FaultCode.storeAlign, FaultCode.loadAlign)
@@ -112,67 +114,66 @@ class LSU(p: XJParams) extends Module {
   val scalarMisaligned = effectiveAddress(1, 0).orR
   val scalarFault = Mux(scalarMisaligned, alignCause,
     Mux(effectiveAddress >= p.dtcmBytes.U, accessCause, FaultCode.none))
-  val matrixTileBytes = Mux(aguEntry.uop.matUnit === 0.U, 512.U,
-    Mux(aguEntry.uop.matOp === MatOp.mload && aguEntry.uop.matBuffer =/= 2.U, 256.U, 1024.U))
+  val matrixTileBytes = Mux(aguEntry.uop.matUnit === 0.U, 128.U,
+    Mux(aguEntry.uop.matOp === MatOp.mload && aguEntry.uop.matBuffer =/= 2.U, 64.U, 256.U))
   val matrixAligned = effectiveAddress(5, 0) === 0.U
   val matrixRange = (effectiveAddress.pad(33) + matrixTileBytes.pad(33)) <= p.dtcmBytes.U(33.W)
-  val matrixAlignCause = Mux(aguStore, FaultCode.matrixStoreAlign, FaultCode.matrixLoadAlign)
-  val matrixAccessCause = Mux(aguStore, FaultCode.matrixStoreAccess, FaultCode.matrixLoadAccess)
-  val matrixFault = Mux(!matrixAligned, matrixAlignCause,
-    Mux(!matrixRange, matrixAccessCause, FaultCode.none))
-  var foundBad: Bool = false.B
-  var firstCause: UInt = FaultCode.none
-  var firstAddress: UInt = effectiveAddress
-  for (lane <- 0 until 16) {
-    val laneAddress = Cat(0.U(1.W), effectiveAddress) + Mux(aguHalf, (lane * 2).U(33.W), (lane * 4).U(33.W))
-    val misaligned = Mux(aguHalf, laneAddress(0), laneAddress(1, 0).orR)
-    val laneFault = Mux(misaligned, alignCause,
-      Mux(laneAddress >= p.dtcmBytes.U(33.W), accessCause, FaultCode.none))
-    val bad = laneMask(aguEntry)(lane) && laneFault =/= FaultCode.none
-    firstCause = Mux(bad && !foundBad, laneFault, firstCause)
-    firstAddress = Mux(bad && !foundBad, laneAddress(31, 0), firstAddress)
-    foundBad = foundBad || bad
-  }
+  val matrixFault = Mux(!matrixAligned, FaultCode.matrixAlign,
+    Mux(!matrixRange, FaultCode.matrixAccess, FaultCode.none))
+  val vectorFault = Mux(effectiveAddress(4, 0).orR,
+    Mux(aguStore, FaultCode.vectorStoreAlign, FaultCode.vectorLoadAlign),
+    Mux(effectiveAddress.pad(33) + 32.U > p.dtcmBytes.U,
+      Mux(aguStore, FaultCode.vectorStoreAccess, FaultCode.vectorLoadAccess), FaultCode.none))
   io.addressIssued.valid := aguValid
   io.addressIssued.bits := aguEntry.uop.tag
   when(aguValid) {
     address(aguIndex) := effectiveAddress
     addressReady(aguIndex) := true.B
-    addressFault(aguIndex) := Mux(aguVector, firstCause,
-      Mux(aguMatrixMem, matrixFault, Mux(aguMatrix, FaultCode.none, scalarFault)))
-    faultAddress(aguIndex) := Mux(aguVector, firstAddress, effectiveAddress)
+    addressFault(aguIndex) := Mux(aguVector, vectorFault,
+      Mux(aguMatrixMem, matrixFault, Mux(aguMatrix || isDma(aguEntry.uop), FaultCode.none, scalarFault)))
+    faultAddress(aguIndex) := effectiveAddress
   }
 
   val oldest = entries(head)
   val vector = isVector(oldest.uop)
   val matrix = isMatrix(oldest.uop)
   val store = isStore(oldest.uop)
-  val half = isVectorHalf(oldest.uop)
-  val authorized = (!store && !matrix) || (io.head.valid && TagMatch(io.head.bits, oldest.uop.tag))
+  val dma = isDma(oldest.uop)
+  val authorized = (!store && !matrix && !dma) || (io.head.valid && TagMatch(io.head.bits, oldest.uop.tag))
   val dataReady = oldest.src2.ready && (!vector || !oldest.uop.usesVOld || oldest.vold.ready)
   val canStart = count =/= 0.U && addressReady(head) && dataReady && authorized &&
-    !active && !vectorRunning && !matrixRunning && !resultValid && !blocked && !io.stop && !io.flush
-  val matrixLaunch = canStart && matrix
+    !active && !vectorRunning && !matrixRunning && !dmaRunning && !resultValid && !blocked && !io.stop && !io.flush
+  io.dmaTask.valid := canStart && dma
+  io.dmaTask.bits := oldest
+  io.dmaResult.ready := dmaRunning && !resultValid
+  when(io.dmaTask.fire) { dmaRunning := true.B }
+  when(io.dmaResult.fire) {
+    when(TagMatch(io.dmaResult.bits.tag, oldest.uop.tag)) {
+      result := io.dmaResult.bits
+      resultValid := true.B
+      dmaRunning := false.B
+      when(io.dmaResult.bits.exception) { blocked := true.B }
+    }
+  }
+  val matrixLaunch = canStart && matrix && addressFault(head) === FaultCode.none
   io.matrixTask.valid := matrixLaunch
+  io.matrixTask.bits.tag := oldest.uop.tag
   io.matrixTask.bits.op := oldest.uop.matOp
   io.matrixTask.bits.unit := oldest.uop.matUnit
   io.matrixTask.bits.buffer := oldest.uop.matBuffer
   io.matrixTask.bits.addr := address(head)
   val lane = PriorityEncoder(pendingLanes)
-  val elementAddress = (address(head) + Mux(half, Cat(lane, 0.U(1.W)), Cat(lane, 0.U(2.W))))(31, 0)
+  val elementAddress = (address(head) + Cat(lane, 0.U(2.W)))(31, 0)
   val requestAddress = Mux(vector, elementAddress, address(head))
-  val storeLanes = oldest.vold.value.asTypeOf(Vec(16, UInt(32.W)))
+  val storeLanes = oldest.vold.value.asTypeOf(Vec(8, UInt(32.W)))
   val storeElement = storeLanes(lane)
-  val halfData = Mux(requestAddress(1), Cat(storeElement(15, 0), 0.U(16.W)),
-    Cat(0.U(16.W), storeElement(15, 0)))
-  val halfMask = Mux(requestAddress(1), "b1100".U, "b0011".U)
   val issuingVector = vectorRunning && pendingLanes.orR && !active && !resultValid &&
     !blocked && !io.stop && !io.flush
-  io.request.valid := (canStart && !vector && !matrix && addressFault(head) === FaultCode.none) || issuingVector
+  io.request.valid := (canStart && !vector && !matrix && !dma && addressFault(head) === FaultCode.none) || issuingVector
   io.request.bits.addr := Cat(requestAddress(31, 2), 0.U(2.W))
-  io.request.bits.data := Mux(vector, Mux(half, halfData, storeElement), oldest.src2.value)
+  io.request.bits.data := Mux(vector, storeElement, oldest.src2.value)
   io.request.bits.write := store
-  io.request.bits.mask := Mux(half, halfMask, "b1111".U)
+  io.request.bits.mask := "b1111".U
   io.response.ready := active && !resultValid
 
   def setResult(data: UInt, fault: UInt, badAddress: UInt): Unit = {
@@ -182,6 +183,9 @@ class LSU(p: XJParams) extends Module {
     result.exception := fault =/= FaultCode.none
     result.cause := fault
     result.badAddr := badAddress
+    result.detail := Mux(fault === FaultCode.none, 0.U,
+      Mux(vector, "h01000000".U, Mux(matrix,
+        "h02000000".U | (oldest.uop.matUnit << 8) | oldest.uop.matBuffer, 0.U)))
     result.nextPc := oldest.uop.pc + 4.U
     resultValid := true.B
   }
@@ -190,37 +194,35 @@ class LSU(p: XJParams) extends Module {
       setResult(0.U, addressFault(head), faultAddress(head))
       blocked := true.B
     }.elsewhen(vector) {
-      when(!laneMask(oldest).orR) {
-        // An empty mask neither checks the base address nor accesses SRAM.
-        setResult(Mux(store, 0.U, oldest.vold.value), FaultCode.none, 0.U)
-      }.otherwise {
-        vectorRunning := true.B
-        pendingLanes := laneMask(oldest)
-        loadData := oldest.vold.value.asTypeOf(Vec(16, UInt(32.W)))
-      }
+      vectorRunning := true.B
+      pendingLanes := "hff".U
+      loadData := 0.U.asTypeOf(loadData)
     }
   }
   when(matrixLaunch && io.matrixTask.fire) { matrixRunning := true.B }
   when(io.matrixDone && matrixRunning) {
-    setResult(0.U, FaultCode.none, 0.U)
+    setResult(0.U, Mux(io.matrixStateFault, FaultCode.matrixState,
+      Mux(io.matrixAccessFault, FaultCode.matrixAccess, FaultCode.none)),
+      Mux(io.matrixAccessFault, address(head), 0.U))
+    when(io.matrixStateFault || io.matrixAccessFault) { blocked := true.B }
     matrixRunning := false.B
   }
   when(io.request.fire) { active := true.B }
   when(io.response.fire) {
     active := false.B
     val fault = Mux(io.response.bits.error,
-      Mux(store, FaultCode.storeAccess, FaultCode.loadAccess), FaultCode.none)
-    val returnedHalf = Mux(requestAddress(1), io.response.bits.data(31, 16), io.response.bits.data(15, 0))
+      Mux(vector, Mux(store, FaultCode.vectorStoreAccess, FaultCode.vectorLoadAccess),
+        Mux(store, FaultCode.storeAccess, FaultCode.loadAccess)), FaultCode.none)
     when(vector) {
       val updatedData = WireDefault(loadData)
       when(!store) {
-        updatedData(lane) := Mux(half, Cat(0.U(16.W), returnedHalf), io.response.bits.data)
+        updatedData(lane) := io.response.bits.data
       }
       loadData := updatedData
-      val remaining = pendingLanes & ~UIntToOH(lane, 16)
+      val remaining = pendingLanes & ~UIntToOH(lane, 8)
       pendingLanes := remaining
       when(io.response.bits.error || !remaining.orR) {
-        setResult(Mux(store, 0.U, updatedData.asUInt), fault, requestAddress)
+        setResult(Mux(store, 0.U, updatedData.asUInt), fault, address(head))
         vectorRunning := false.B
       }
     }.otherwise {
@@ -257,6 +259,7 @@ class LSU(p: XJParams) extends Module {
     active := false.B
     vectorRunning := false.B
     matrixRunning := false.B
+    dmaRunning := false.B
     resultValid := false.B
     blocked := false.B
   }

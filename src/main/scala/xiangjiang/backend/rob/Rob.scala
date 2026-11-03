@@ -35,13 +35,14 @@ class Rob(p: XJParams) extends Module {
   val hasVectorResult = Reg(Vec(p.nRob, Bool()))
   val vectorResultIndex = Reg(Vec(p.nRob, UInt(vectorResultBits.W)))
   val exception = Reg(Vec(p.nRob, Bool()))
-  val cause = Reg(Vec(p.nRob, UInt(4.W)))
+  val cause = Reg(Vec(p.nRob, UInt(5.W)))
+  val detail = Reg(Vec(p.nRob, UInt(32.W)))
   val badAddr = Reg(Vec(p.nRob, UInt(32.W)))
   val nextPc = Reg(Vec(p.nRob, UInt(32.W)))
   val resultUsed = RegInit(VecInit(Seq.fill(p.nXRes)(false.B)))
   val resultData = Reg(Vec(p.nXRes, UInt(32.W)))
   val vectorResultUsed = RegInit(VecInit(Seq.fill(p.nVRes)(false.B)))
-  val vectorResultData = Reg(Vec(p.nVRes, UInt(512.W)))
+  val vectorResultData = Reg(Vec(p.nVRes, UInt(p.vectorBits.W)))
 
   val headIndex = RegInit(0.U(p.robBits.W))
   val tailIndex = RegInit(0.U(p.robBits.W))
@@ -79,6 +80,7 @@ class Rob(p: XJParams) extends Module {
       Mux(hasResult(headIndex), resultData(resultIndex(headIndex)), 0.U)))
   io.retire.bits.exception := exception(headIndex)
   io.retire.bits.cause := cause(headIndex)
+  io.retire.bits.detail := detail(headIndex)
   io.retire.bits.badAddr := badAddr(headIndex)
   io.retire.bits.nextPc := nextPc(headIndex)
 
@@ -107,6 +109,7 @@ class Rob(p: XJParams) extends Module {
     done(wbSlot) := true.B
     exception(wbSlot) := io.wb.bits.exception
     cause(wbSlot) := io.wb.bits.cause
+    detail(wbSlot) := io.wb.bits.detail
     badAddr(wbSlot) := io.wb.bits.badAddr
     nextPc(wbSlot) := io.wb.bits.nextPc
     when(hasResult(wbSlot) && !io.wb.bits.exception) {
@@ -139,6 +142,7 @@ class Rob(p: XJParams) extends Module {
     vectorResultIndex(tailIndex) := freeVectorResultIndex
     exception(tailIndex) := io.allocate.bits.exception
     cause(tailIndex) := io.allocate.bits.cause
+    detail(tailIndex) := 0.U
     badAddr(tailIndex) := io.allocate.bits.badAddr
     nextPc(tailIndex) := io.allocate.bits.pc + 4.U
     tailIndex := increment(tailIndex)

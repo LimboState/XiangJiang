@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Test-side matrix encodings from Matrix_ISA.md. */
+/** Test-side matrix encodings from docs/xj-isa.md. */
 object MatrixEncoding {
   def msetmode(unit: Int, mode: Int): BigInt =
     ((mode & 1) << 20) | ((unit & 3) << 12) | 0x2b
@@ -40,8 +40,7 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         v | (BigInt(bytes.getOrElse(address + i, 0)) << (8 * i))
       }
       def get32s(address: Long, count: Int): Seq[Int] = {
-        val data = get64(address)
-        (0 until count).map(i => ((data >> (32 * i)) & wordMask).toInt)
+        (0 until count).map(i => ((get64(address + i * 4) & wordMask)).toInt)
       }
       var program = Seq.empty[BigInt]
       var cycles = 0
@@ -142,22 +141,20 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         assert(matrixResponse.isEmpty)
       }
 
-      // INT8 matrix multiply: A is 16x16 in [-3, 3], B is 16x16 in [-2, 2].
-      val a = Array.tabulate(16, 16) { (i, j) => ((i * 16 + j) % 7) - 3 }
-      val b = Array.tabulate(16, 16) { (k, j) => ((k * 16 + j) % 5) - 2 }
-      val c = Array.tabulate(16, 16) { (i, j) =>
-        (0 until 16).map(k => a(i)(k) * b(k)(j)).sum
+      val a = Array.tabulate(8, 8) { (i, j) => ((i * 8 + j) % 7) - 3 }
+      val b = Array.tabulate(8, 8) { (k, j) => ((k * 8 + j) % 5) - 2 }
+      val c = Array.tabulate(8, 8) { (i, j) =>
+        (0 until 8).map(k => a(i)(k) * b(k)(j)).sum
       }
-      for (beat <- 0 until 4) {
-        put8(beat * 64L, (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 16).map(col => a(r)(col))
-        })
-      }
-      for (beat <- 0 until 4) {
-        put8(256L + beat * 64L, (beat * 4 until beat * 4 + 4).flatMap { r =>
-          (0 until 16).map(col => b(r)(col))
-        })
-      }
+      put8(0, a.toSeq.flatMap(_.toSeq))
+      put8(256, b.toSeq.flatMap(_.toSeq))
+      // Runtime state faults and complete footprint prechecks must issue no beat.
+      run(Seq(mmul(2), halt), 14)
+      dut.io.status.faultCause.expect(14)
+      run(Seq(addi(1, 0, -1), mload(1, 0, 1), halt), 12)
+      dut.io.status.faultCause.expect(12)
+      run(Seq(addi(1, 0, -64), mload(1, 0, 1), halt), 13)
+      dut.io.status.faultCause.expect(13)
 
       run(Seq(
         addi(1, 0, 0), addi(2, 0, 256), addi(3, 0, 512),
@@ -170,8 +167,8 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         mfence,
         halt))
 
-      for (i <- 0 until 16) {
-        val row = get32s(512L + i * 64L, 16)
+      for (i <- 0 until 8) {
+        val row = get32s(512L + i * 32L, 8)
         assert(row == c(i).toSeq, s"INT8 row $i mismatch: $row != ${c(i).toSeq}")
       }
 
@@ -185,8 +182,8 @@ class MatrixCoreSpec extends AnyFunSuite with ChiselSim {
         mstore(1, 3),
         mfence,
         halt))
-      for (i <- 0 until 16) {
-        val row = get32s(1024L + i * 64L, 16)
+      for (i <- 0 until 8) {
+        val row = get32s(1024L + i * 32L, 8)
         assert(row == c(i).toSeq, s"second INT8 row $i mismatch: $row != ${c(i).toSeq}")
       }
     }

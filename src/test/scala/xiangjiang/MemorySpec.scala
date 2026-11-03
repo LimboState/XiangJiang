@@ -355,7 +355,7 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
         dut.io.start.expect(false.B); dut.io.ack.expect(false.B)
         until(dut, dut.io.axi.b.valid.peek().litToBoolean)
         // CSR reads remain independent while the write response is held.
-        read(0x30, 1)
+        read(0x30, 2)
         for (_ <- 0 until 3) {
           dut.io.axi.b.valid.expect(true.B); dut.io.axi.b.bits.expect((if (error) 2 else 0).U)
           dut.io.start.expect(false.B); dut.io.ack.expect(false.B); dut.clock.step()
@@ -377,9 +377,9 @@ class MemorySpec extends AnyFunSuite with ChiselSim {
       dut.io.status.busy.poke(false.B); dut.io.status.fault.poke(false.B)
       for ((a, v) <- Seq(0 -> 0, 4 -> 0, 8 -> 20, 12 -> 21, 16 -> 7, 20 -> 23,
         24 -> p.itcmBytes, 28 -> p.dtcmBytes, 32 -> p.nRob, 36 -> p.nXRes,
-        40 -> p.nMemq, 44 -> p.nIssue, 48 -> 1)) read(a, v)
+        40 -> p.nMemq, 44 -> p.nIssue, 48 -> 2)) read(a, v)
       for (i <- 0 until 32) read(0x100 + i * 4, if (i == 0) 0 else 100 + i)
-      for (a <- Seq(1, 0x34, 0xfc, 0x180)) read(a, 0, error = true)
+      for (a <- Seq(1, 0x54, 0xfc, 0x180)) read(a, 0, error = true)
       for (a <- Seq(1, 4, 0x100, 0x180)) write(a, 1, error = true)
     }
   }

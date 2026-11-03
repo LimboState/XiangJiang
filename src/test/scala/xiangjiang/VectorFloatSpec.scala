@@ -29,6 +29,7 @@ class VectorFloatHarness extends Module {
     val fromInt = Output(UInt(32.W))
     val toInt = Output(UInt(32.W))
     val add32 = Output(UInt(32.W))
+    val fma32 = Output(UInt(32.W))
     val exp = Output(UInt(16.W))
     val rcp = Output(UInt(16.W))
     val rsqrt = Output(UInt(16.W))
@@ -48,6 +49,7 @@ class VectorFloatHarness extends Module {
   io.fromInt := VectorFloat.fromInt(io.integer)
   io.toInt := VectorFloat.toInt(io.x)
   io.add32 := VectorFloat.add32(io.x, io.y)
+  io.fma32 := VectorFloat.fma32(io.x, io.y, io.integer)
   io.exp := VectorFloat.exp(io.a)
   io.rcp := VectorFloat.rcp(io.a)
   io.rsqrt := VectorFloat.rsqrt(io.a)
@@ -115,16 +117,16 @@ class VectorFloatSpec extends AnyFunSuite with ChiselSim {
     else if (x.zero || y.inf) signBit(sign, 8)
     else encode((if (sign) -x.n else x.n) * y.d, x.d * y.n, 8)
   }
-  private def fma(a: BigInt, b: BigInt, c: BigInt): BigInt = {
-    val x = decode(a, 8); val y = decode(b, 8); val z = decode(c, 8)
+  private def fma(a: BigInt, b: BigInt, c: BigInt, p: Int = 8): BigInt = {
+    val x = decode(a, p); val y = decode(b, p); val z = decode(c, p)
     val ps = x.sign ^ y.sign
     val productInf = x.inf || y.inf
     if (x.nan || y.nan || z.nan || (x.inf && y.zero) || (y.inf && x.zero) ||
-      (productInf && z.inf && ps != z.sign)) nan(8)
-    else if (productInf) infinity(ps, 8)
-    else if (z.inf) infinity(z.sign, 8)
+      (productInf && z.inf && ps != z.sign)) nan(p)
+    else if (productInf) infinity(ps, p)
+    else if (z.inf) infinity(z.sign, p)
     else encode(x.signed * y.signed * z.d + z.signed * x.d * y.d,
-      x.d * y.d * z.d, 8, ps && z.sign)
+      x.d * y.d * z.d, p, ps && z.sign)
   }
   private def compare(a: BigInt, b: BigInt): Option[Int] = {
     val x = decode(a, 8); val y = decode(b, 8)
@@ -177,12 +179,13 @@ class VectorFloatSpec extends AnyFunSuite with ChiselSim {
           dut.io.equal.expect(cmp.contains(0))
           dut.io.less.expect(cmp.exists(_ < 0))
           dut.io.lessEqual.expect(cmp.exists(_ <= 0))
-          dut.io.widen.expect(if (decode(a, 8).nan) nan(24) else a << 16)
+          dut.io.widen.expect(a << 16)
           dut.io.narrow.expect(narrow(x))
           val signedInt = if (integer.testBit(31)) integer - (BigInt(1) << 32) else integer
           dut.io.fromInt.expect(encode(signedInt, 1, 24))
           dut.io.toInt.expect(toInt(x))
           dut.io.add32.expect(add(x, y, 24))
+          dut.io.fma32.expect(fma(x, y, integer, 24))
         }
       }
       val edges = Seq(0x0000, 0x8000, 0x0001, 0x8001, 0x0002, 0x007f, 0x807f,

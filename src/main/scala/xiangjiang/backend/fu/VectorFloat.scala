@@ -121,28 +121,45 @@ object VectorFloat {
         Mux(x.isZero || y.isInf, zero(sign, p), finite)))
   }
 
+  /** Shared classification/rounding for the iterative BF16 divider. */
+  def divisionOperands(a: UInt, b: UInt): (UInt, UInt) = {
+    val x = new Parts(a, 8); val y = new Parts(b, 8)
+    (Cat(x.normalized, 0.U(12.W)), Mux(y.isZero, 1.U(8.W), y.normalized))
+  }
+  def divisionResult(a: UInt, b: UInt, quotient: UInt, remainder: UInt): UInt = {
+    val x = new Parts(a, 8); val y = new Parts(b, 8)
+    val sign = x.sign ^ y.sign
+    val finite = round(quotient(12, 0) | remainder.orR.asUInt,
+      x.exponent - y.exponent - 12.S(12.W), sign, 8)
+    Mux(x.isNaN || y.isNaN || (x.isZero && y.isZero) || (x.isInf && y.isInf), nan(8),
+      Mux(x.isInf || y.isZero, infinity(sign, 8), Mux(x.isZero || y.isInf, zero(sign, 8), finite)))
+  }
+
   def div(a: UInt, b: UInt): UInt = divGeneric(a(15, 0), b(15, 0), 8)
   def div32(a: UInt, b: UInt): UInt = divGeneric(a(31, 0), b(31, 0), 24)
 
-  def fma(a: UInt, b: UInt, c: UInt): UInt = {
-    val x = new Parts(a, 8)
-    val y = new Parts(b, 8)
-    val z = new Parts(c, 8)
+  def fma(a: UInt, b: UInt, c: UInt): UInt = fmaGeneric(a, b, c, 8)
+  def fma32(a: UInt, b: UInt, c: UInt): UInt = fmaGeneric(a, b, c, 24)
+
+  private def fmaGeneric(a: UInt, b: UInt, c: UInt, p: Int): UInt = {
+    val x = new Parts(a, p)
+    val y = new Parts(b, p)
+    val z = new Parts(c, p)
     val ps = x.sign ^ y.sign
     val product = x.normalized * y.normalized
-    val high = product(15)
+    val high = product(2 * p - 1)
     val pm = Mux(high, Cat(0.U(1.W), product, 0.U(4.W)),
-      Cat(0.U(1.W), product(14, 0), 0.U(5.W)))
-    val cm = Cat(0.U(1.W), z.normalized, 0.U(12.W))
+      Cat(0.U(1.W), product(2 * p - 2, 0), 0.U(5.W)))
+    val cm = Cat(0.U(1.W), z.normalized, 0.U((p + 4).W))
     val pe = Mux(x.isZero || y.isZero, (-512).S(12.W),
       x.exponent + y.exponent + high.asUInt.zext)
     val ce = Mux(z.isZero, (-512).S(12.W), z.exponent)
-    val finite = sumMagnitudes(pm, pe, ps, cm, ce, z.sign, 8)
+    val finite = sumMagnitudes(pm, pe, ps, cm, ce, z.sign, p)
     val invalidProduct = (x.isInf && y.isZero) || (y.isInf && x.isZero)
     val productInf = x.isInf || y.isInf
     Mux(x.isNaN || y.isNaN || z.isNaN || invalidProduct ||
-      (productInf && z.isInf && ps =/= z.sign), nan(8),
-      Mux(productInf, infinity(ps, 8), Mux(z.isInf, infinity(z.sign, 8), finite)))
+      (productInf && z.isInf && ps =/= z.sign), nan(p),
+      Mux(productInf, infinity(ps, p), Mux(z.isInf, infinity(z.sign, p), finite)))
   }
 
   def eq(a: UInt, b: UInt): Bool = {
@@ -253,9 +270,16 @@ object VectorFloat {
   def rcp(a: UInt): UInt = div("h3f80".U(16.W), a(15, 0))
   def rsqrt(a: UInt): UInt = narrow(rsqrt32(widen(a(15, 0))))
 
-  def widen(a: UInt): UInt = {
-    val x = new Parts(a, 8)
-    Mux(x.isNaN, nan(24), Cat(a(15, 0), 0.U(16.W)))
+  // Widening is a bit-preserving conversion, including signaling NaN payloads.
+  def widen(a: UInt): UInt = Cat(a(15, 0), 0.U(16.W))
+
+  def max32(a: UInt, b: UInt): UInt = {
+    val x = new Parts(a, 24)
+    val y = new Parts(b, 24)
+    val less = Mux(x.sign =/= y.sign, x.sign,
+      Mux(x.sign, a(30, 0) > b(30, 0), a(30, 0) < b(30, 0)))
+    Mux(x.isNaN && y.isNaN, nan(24), Mux(x.isNaN, b, Mux(y.isNaN, a,
+      Mux(x.isZero && y.isZero, zero(x.sign && y.sign, 24), Mux(less, b, a)))))
   }
 
   def narrow(a: UInt): UInt = {

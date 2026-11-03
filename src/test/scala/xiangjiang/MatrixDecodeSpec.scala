@@ -39,7 +39,7 @@ class MatrixDecodeSpec extends AnyFunSuite with ChiselSim {
       check(mmacc(2), MatOp.mmacc, FuType.matrix, false, false, unit = 2)
       check(mew(0), MatOp.mew, FuType.matrix, false, false)
       check(mtrans(0), MatOp.mtrans, FuType.matrix, false, false)
-      check(mwait(2), MatOp.mwait, FuType.matrix, false, false, unit = 2)
+      check(mwait(2), MatOp.mwait, FuType.matrix, false, true, unit = 2)
       check(mfence, MatOp.mfence, FuType.system, false, true, checkUnit = false)
       check(mbarrier(17), MatOp.mbarrier, FuType.system, false, true, checkUnit = false)
 

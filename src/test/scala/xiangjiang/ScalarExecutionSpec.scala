@@ -174,7 +174,7 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
         s(0, 0), s(0, 1), BigInt(0x200073),
         BigInt(0xf3), BigInt(0x8073), BigInt(0x1000f3), BigInt(0x108073),
         BigInt(0x1073), BigInt(0x100f), BigInt(0x53),
-        Rv32.halt | 0x80, Rv32.halt | (BigInt(1) << 26), Rv32.halt | (BigInt(1) << 12), mask)
+        Rv32.halt | 0x80, Rv32.halt | (BigInt(1) << 26), Rv32.halt | (BigInt(7) << 12), mask)
       for (inst <- illegal) {
         c.io.in.inst.poke(inst)
         c.io.out.exception.expect(true)
@@ -292,13 +292,13 @@ class ScalarExecutionSpec extends AnyFunSuite with ChiselSim {
       run(b(2), 1, 0, 0x100, 0x104) // Unselected misaligned target is harmless.
       run(b(-4096), 1, 0, 0x100, 0x104) // Unselected out-of-range target is harmless.
       run(b(2), 1, 1, 0x100, 0x102, 2)
-      run(b(8), 1, 1, 0x7fffc, 0x80004, 3)
-      run(b(-4), 1, 0, 0x7fffc, 0x80000, 3) // Not taken fallthrough is still checked.
+      run(b(8), 1, 1, 0x3fffc, 0x40004, 3)
+      run(b(-4), 1, 0, 0x3fffc, 0x40000, 3) // Not taken fallthrough is still checked.
       run(j(-4), 0, 0, 4, 0, link = 8)
-      run(j(4, rd = 0), 0, 0, 0x7fff8, 0x7fffc, link = 0x7fffc)
+      run(j(4, rd = 0), 0, 0, 0x3fff8, 0x3fffc, link = 0x3fffc)
       c.io.decoded.writesRd.expect(false)
       run(j(2), 0, 0, 0x100, 0x102, 2)
-      run(j(4), 0, 0, 0x7fffc, 0x80000, 3)
+      run(j(4), 0, 0, 0x3fffc, 0x40000, 3)
       run(j(-4), 0, 0, 0, mask - 3, 3)
       run(i(4, 0, 0x67, rd = 1, rs1 = 1), 0x200, 0, 0x100, 0x204, link = 0x104)
       run(i(0, 0, 0x67), 0x201, 0, 0x100, 0x200, link = 0x104)

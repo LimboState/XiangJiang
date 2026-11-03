@@ -14,6 +14,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   val io = IO(new Bundle {
     val axi = new Axi4Slave(p.axiIdBits)
     val coreBusy = Input(Bool())
+    val busPoisoned = Input(Bool())
     val hostIdle = Output(Bool())
     val fetchReq = Flipped(Decoupled(UInt(32.W)))
     val fetchResp = Output(Valid(new FetchPacket))
@@ -63,8 +64,8 @@ class MemorySubsystem(p: XJParams) extends Module {
   val wBusy = Reg(Bool())
   val bValid = RegInit(false.B)
   val b = Reg(new AxiWriteResponse(p.axiIdBits))
-  io.axi.aw.ready := !awValid && !bValid
-  io.axi.w.ready := !wValid && !bValid
+  io.axi.aw.ready := !awValid && !bValid && !io.busPoisoned
+  io.axi.w.ready := !wValid && !bValid && (!io.busPoisoned || awValid)
   io.axi.b.valid := bValid
   io.axi.b.bits := b
   when(io.axi.aw.fire) {
@@ -89,7 +90,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   val rValid = RegInit(false.B)
   val r = Reg(new AxiReadData(p.axiIdBits))
   val rPending = RegInit(false.B)
-  io.axi.ar.ready := !arValid && !rValid && !rPending
+  io.axi.ar.ready := !arValid && !rValid && !rPending && !io.busPoisoned
   io.axi.r.valid := rValid
   io.axi.r.bits := r
   when(io.axi.ar.fire) {
@@ -160,6 +161,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   when(matrixPending) {
     matrixValid := true.B
     matrix.data := Mux(matrixWasError || matrixWasWrite, 0.U, dtcm.io.readData(matrixBank))
+    matrix.error := matrixWasError
   }
 
   val coreDataAccess = dataAccess || matrixAccess
@@ -213,7 +215,7 @@ class MemorySubsystem(p: XJParams) extends Module {
   itcm.io.enable := fetchAccess || (hostWrite && writeItcm) || (hostRead && readItcm)
   itcm.io.write := hostWrite && writeItcm
   itcm.io.word := Mux(fetchAccess, io.fetchReq.bits,
-    Mux(hostWrite && writeItcm, wAddress, rAddress))(18, 2)
+    Mux(hostWrite && writeItcm, wAddress, rAddress))(log2Ceil(p.itcmBytes) - 1, 2)
   itcm.io.data := w.data
   itcm.io.mask := w.strb
 

@@ -18,7 +18,7 @@ class RenameStage(p: XJParams) extends Module {
     val commit = Input(Valid(new CommitRecord(p)))
     val flush = Input(Bool())
     val debugRegs = Output(Vec(32, UInt(32.W)))
-    val debugVRegs = Output(Vec(32, UInt(512.W)))
+    val debugVRegs = Output(Vec(32, UInt(p.vectorBits.W)))
   })
 
   // x0 has neither architectural storage nor a RAT entry.
@@ -28,7 +28,7 @@ class RenameStage(p: XJParams) extends Module {
   val commitWrites = io.commit.valid && !io.commit.bits.exception &&
     io.commit.bits.uop.writesRd && io.commit.bits.uop.rd =/= 0.U
   // Every vector register, including v0, has architectural storage and a RAT entry.
-  val vectorRegisters = RegInit(VecInit(Seq.fill(32)(0.U(512.W))))
+  val vectorRegisters = RegInit(VecInit(Seq.fill(32)(0.U(p.vectorBits.W))))
   val vectorMapped = RegInit(VecInit(Seq.fill(32)(false.B)))
   val vectorMappings = Reg(Vec(32, new RobTag(p)))
   val commitWritesVector = io.commit.valid && !io.commit.bits.exception && io.commit.bits.uop.writesV
@@ -73,7 +73,9 @@ class RenameStage(p: XJParams) extends Module {
     }
   }
 
-  val vectorSources = Seq(io.uop.rs1, io.uop.rs2, io.uop.rd, io.uop.maskReg)
+  val storeSource = io.uop.op === UOpCode.VECTOR && io.uop.vecOp === VecOp.vse32.U
+  val vectorSources = Seq(io.uop.rs1, io.uop.rs2,
+    Mux(storeSource, io.uop.rs2, io.uop.rd), io.uop.maskReg)
   val vectorUsed = Seq(io.uop.usesV1, io.uop.usesV2, io.uop.usesVOld, io.uop.usesVMask)
   val vectorOperands = Seq(io.renamed.vsrc1, io.renamed.vsrc2, io.renamed.vold, io.renamed.vmask)
   for (port <- 0 until 4) {
