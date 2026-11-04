@@ -109,15 +109,22 @@ object VectorFloat {
   def add32Pipelined(a: UInt, b: UInt): UInt = addGeneric(a(31, 0), b(31, 0), 24, true)
   def fmaPipelined(a: UInt, b: UInt, c: UInt): UInt = fmaGeneric(a, b, c, 8, true)
 
-  private def mulGeneric(a: UInt, b: UInt, p: Int): UInt = {
+  val addPipelineStages = 4
+  val mulPipelineStages = 4
+  def addPipelined(a: UInt, b: UInt): UInt = addGeneric(a(15, 0), b(15, 0), 8, true)
+  def subPipelined(a: UInt, b: UInt): UInt = addPipelined(a, Cat(!b(15), b(14, 0)))
+  def mulPipelined(a: UInt, b: UInt): UInt = mulGeneric(a(15, 0), b(15, 0), 8, true)
+
+  private def mulGeneric(a: UInt, b: UInt, p: Int, pipelined: Boolean = false): UInt = {
     val x = new Parts(a, p)
     val y = new Parts(b, p)
     val sign = x.sign ^ y.sign
-    val product = x.normalized * y.normalized
+    val product = stage(stage(x.normalized, pipelined) * stage(y.normalized, pipelined), pipelined)
     val finite = round(Cat(product, 0.U(3.W)),
-      x.exponent + y.exponent - (2 * p + 1).S(12.W), sign, p)
-    Mux(x.isNaN || y.isNaN || (x.isInf && y.isZero) || (y.isInf && x.isZero), nan(p),
-      Mux(x.isInf || y.isInf, infinity(sign, p), finite))
+      delay(x.exponent + y.exponent - (2 * p + 1).S(12.W), 2, pipelined),
+      delay(sign, 2, pipelined), p, pipelined)
+    Mux(delay(x.isNaN || y.isNaN || (x.isInf && y.isZero) || (y.isInf && x.isZero), 4, pipelined), nan(p),
+      Mux(delay(x.isInf || y.isInf, 4, pipelined), infinity(delay(sign, 4, pipelined), p), finite))
   }
 
   def mul(a: UInt, b: UInt): UInt = mulGeneric(a(15, 0), b(15, 0), 8)

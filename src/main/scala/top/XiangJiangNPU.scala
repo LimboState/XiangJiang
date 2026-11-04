@@ -23,12 +23,19 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   io.control <> control.io.axi
   io.memory <> tcm.io.axi
   io.external <> core.io.external
-  control.io.status := core.io.status
+  // Accepted START is a one-cycle registered command. Reserve the memory and
+  // status interface during that cycle so no host transaction can slip between
+  // the idle check and the core becoming busy. Acceptance itself still checks
+  // live host channel activity in ControlRegisters/MemorySubsystem.
+  val startPending = RegNext(control.io.start, false.B)
+  val visibleStatus = WireDefault(core.io.status)
+  visibleStatus.busy := core.io.status.busy || startPending
+  control.io.status := visibleStatus
   control.io.hostIdle := tcm.io.hostIdle
   control.io.debugRegs := core.io.debugRegs
-  core.io.start := control.io.start
+  core.io.start := startPending
   core.io.ack := control.io.ack
-  tcm.io.coreBusy := core.io.status.busy
+  tcm.io.coreBusy := visibleStatus.busy
   tcm.io.busPoisoned := core.io.status.dma.poisoned
   tcm.io.fetchReq <> core.io.fetchReq
   core.io.fetchResp := tcm.io.fetchResp
@@ -36,7 +43,7 @@ class XiangJiangNPU(val p: XJParams = XJParams()) extends Module {
   core.io.dataResp <> tcm.io.dataResp
   tcm.io.matrixReq <> core.io.matrixReq
   core.io.matrixResp <> tcm.io.matrixResp
-  io.status := core.io.status
+  io.status := visibleStatus
   io.retire := core.io.retire
   io.debugRegs := core.io.debugRegs
   io.debugVRegs := core.io.debugVRegs

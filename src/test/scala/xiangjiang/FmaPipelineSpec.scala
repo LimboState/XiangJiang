@@ -17,7 +17,41 @@ class FmaPipelineHarness extends Module {
   io.pipelined := VectorFloat.fma32Pipelined(io.a, io.b, io.c)
 }
 
+class BFloatPipelineHarness extends Module {
+  val io = IO(new Bundle {
+    val a = Input(UInt(16.W))
+    val b = Input(UInt(16.W))
+    val reference = Output(Vec(3, UInt(16.W)))
+    val pipelined = Output(Vec(3, UInt(16.W)))
+  })
+  io.reference(0) := VectorFloat.add(io.a, io.b)
+  io.reference(1) := VectorFloat.sub(io.a, io.b)
+  io.reference(2) := VectorFloat.mul(io.a, io.b)
+  io.pipelined(0) := VectorFloat.addPipelined(io.a, io.b)
+  io.pipelined(1) := VectorFloat.subPipelined(io.a, io.b)
+  io.pipelined(2) := VectorFloat.mulPipelined(io.a, io.b)
+}
+
 class FmaPipelineSpec extends AnyFunSuite with ChiselSim {
+  test("BF16 add sub mul pipelines preserve results and align specials at full throughput") {
+    simulate(new BFloatPipelineHarness) { d =>
+      val random = new scala.util.Random(727)
+      val specials = Seq(0, 0x8000, 1, 0x7f, 0x80, 0x3f80, 0xbf80,
+        0x7f7f, 0x7f80, 0xff80, 0x7fc0, 0x7f81)
+      val inputs = (for (a <- specials; b <- specials) yield (a, b)) ++
+        Seq.fill(1000)((random.nextInt(65536), random.nextInt(65536)))
+      val expected = scala.collection.mutable.Queue.empty[Seq[BigInt]]
+      for ((a, b) <- inputs ++ Seq.fill(4)((0, 0))) {
+        d.io.a.poke(a); d.io.b.poke(b)
+        expected.enqueue(d.io.reference.map(_.peek().litValue).toSeq)
+        d.clock.step()
+        if (expected.size >= 4) {
+          for ((port, value) <- d.io.pipelined.zip(expected.dequeue())) port.expect(value.U)
+        }
+      }
+    }
+  }
+
   test("six-stage FMA matches the combinational fused result at full pipeline throughput") {
     simulate(new FmaPipelineHarness) { d =>
       val random = new scala.util.Random(726)

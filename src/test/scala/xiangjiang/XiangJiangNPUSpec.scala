@@ -171,6 +171,30 @@ class XiangJiangNPUSpec extends AnyFunSuite with ChiselSim {
 
       assert(readCsr(0x18) == 256 * 1024)
       assert(readCsr(0x1c) == p.dtcmBytes)
+      // START acceptance reserves the host interface during the registered
+      // launch cycle, before the core's running register has been set.
+      writeMemory(0, Seq(halt))
+      writeMemory(0x10000000L, Seq(BigInt(123)))
+      c.aw.bits.addr.poke(0); c.aw.valid.poke(true)
+      c.w.bits.data.poke(1); c.w.valid.poke(true)
+      c.aw.ready.expect(true); c.w.ready.expect(true)
+      tick(); c.aw.valid.poke(false); c.w.valid.poke(false)
+      tick() // START accepted; startPending is now high
+      c.b.valid.expect(true); c.b.bits.expect(0)
+      dut.io.status.busy.expect(true)
+      // Both requests are accepted as errors, not allowed to touch SRAM.
+      m.aw.bits.addr.poke(0x10000000L); m.aw.bits.len.poke(0); m.aw.valid.poke(true)
+      m.w.bits.data.poke(999); m.w.bits.last.poke(true); m.w.valid.poke(true)
+      m.ar.bits.addr.poke(0x10000000L); m.ar.bits.len.poke(0); m.ar.valid.poke(true)
+      m.aw.ready.expect(true); m.w.ready.expect(true); m.ar.ready.expect(true)
+      tick(); m.aw.valid.poke(false); m.w.valid.poke(false); m.ar.valid.poke(false)
+      until(m.b.valid.peek().litToBoolean && m.r.valid.peek().litToBoolean)
+      m.b.bits.resp.expect(2); m.r.bits.resp.expect(2)
+      m.b.ready.poke(true); m.r.ready.poke(true); c.b.ready.poke(true)
+      tick(); m.b.ready.poke(false); m.r.ready.poke(false); c.b.ready.poke(false)
+      until(dut.io.status.done.peek().litToBoolean)
+      control(2)
+      assert(readMemory(0x10000000L) == 123)
       writeMemory(0x10000000L, Seq(7, -3, 9, 11).map(x => BigInt(x) & BigInt("ffffffff", 16)))
       // Sum four words, exercising negative branch displacement, loads and captured store data.
       val sum = Seq(addi(1, 0, 0), addi(2, 0, 4), addi(3, 0, 0),

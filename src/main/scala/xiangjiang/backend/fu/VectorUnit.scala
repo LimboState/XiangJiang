@@ -79,9 +79,18 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
     when(divide) { value := div.io.resp.bits; laneDone := !active || div.io.resp.valid }
   }
   if (supports(2)) { switch(op) {
-    is(VecOp.vfadd.U, (VecOp.vfadd + 1).U) { value := VectorFloat.add(a(15, 0), b(15, 0)) }
-    is(VecOp.vfsub.U, (VecOp.vfsub + 1).U) { value := VectorFloat.sub(a(15, 0), b(15, 0)) }
-    is(VecOp.vfmul.U, (VecOp.vfmul + 1).U) { value := VectorFloat.mul(a(15, 0), b(15, 0)) }
+    is(VecOp.vfadd.U, (VecOp.vfadd + 1).U) {
+      value := VectorFloat.addPipelined(a(15, 0), b(15, 0))
+      laneDone := arithmeticCycle === VectorFloat.addPipelineStages.U
+    }
+    is(VecOp.vfsub.U, (VecOp.vfsub + 1).U) {
+      value := VectorFloat.subPipelined(a(15, 0), b(15, 0))
+      laneDone := arithmeticCycle === VectorFloat.addPipelineStages.U
+    }
+    is(VecOp.vfmul.U, (VecOp.vfmul + 1).U) {
+      value := VectorFloat.mulPipelined(a(15, 0), b(15, 0))
+      laneDone := arithmeticCycle === VectorFloat.mulPipelineStages.U
+    }
     is(VecOp.vfmacc.U, (VecOp.vfmacc + 1).U) {
       value := VectorFloat.fmaPipelined(a(15, 0), b(15, 0), oldLane)
       laneDone := arithmeticCycle === VectorFloat.fma32PipelineStages.U
