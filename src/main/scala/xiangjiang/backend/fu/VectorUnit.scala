@@ -7,7 +7,7 @@ import xiangjiang._
 /** Folded eight-lane execution with one stable, full-vector completion. */
 class VectorUnit(p: XJParams, group: Int = -1) extends Module {
   val io = IO(new ScalarUnitIO(p))
-  private val idle :: running :: complete :: Nil = Enum(3)
+  private val idle :: selectLane :: running :: complete :: Nil = Enum(4)
   private val state = RegInit(idle)
   private val uop = Reg(new MicroOp(p))
   private val source1 = Reg(Vec(8, UInt(32.W)))
@@ -27,8 +27,19 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
 
   private val op = uop.vecOp
   private val active = uop.unmasked || mask(lane)
-  private val a = Mux(active || op === VecOp.vmerge.U, source2(lane), 0.U)
-  private val b = Mux(active, Mux(op(0), scalar, source1(lane)), 0.U)
+  // Isolate the dynamic lane mux from arithmetic. Operands remain stable
+  // throughout multi-cycle arithmetic and reduction feedback.
+  private val a = Reg(UInt(32.W))
+  private val b = Reg(UInt(32.W))
+  private val oldLane = Reg(UInt(16.W))
+  private val arithmeticCycle = RegInit(0.U(3.W))
+  when(state === selectLane) {
+    a := Mux(active || op === VecOp.vmerge.U, source2(lane), 0.U)
+    b := Mux(active, Mux(op(0), scalar, source1(lane)), 0.U)
+    oldLane := Mux(active, old(lane)(15, 0), 0.U)
+    arithmeticCycle := 0.U
+  }
+  when(state === running) { arithmeticCycle := arithmeticCycle + 1.U }
   private val isComparison = op >= VecOp.vmseq.U && op <= (VecOp.vmfle + 1).U
   private val isReduction = op === VecOp.fredsum.U || op === VecOp.fredmax.U
   private val value = WireDefault(0.U(32.W))
@@ -72,7 +83,8 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
     is(VecOp.vfsub.U, (VecOp.vfsub + 1).U) { value := VectorFloat.sub(a(15, 0), b(15, 0)) }
     is(VecOp.vfmul.U, (VecOp.vfmul + 1).U) { value := VectorFloat.mul(a(15, 0), b(15, 0)) }
     is(VecOp.vfmacc.U, (VecOp.vfmacc + 1).U) {
-      value := VectorFloat.fma(a(15, 0), b(15, 0), Mux(active, old(lane)(15, 0), 0.U))
+      value := VectorFloat.fmaPipelined(a(15, 0), b(15, 0), oldLane)
+      laneDone := arithmeticCycle === VectorFloat.fma32PipelineStages.U
     }
     is(VecOp.vfmax.U, (VecOp.vfmax + 1).U) { value := VectorFloat.max(a(15, 0), b(15, 0)) }
     is(VecOp.vfmin.U, (VecOp.vfmin + 1).U) { value := VectorFloat.min(a(15, 0), b(15, 0)) }
@@ -112,7 +124,10 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
     (accumulated & ~bitMask) | Mux(comparison, bitMask, 0.U), accumulated)
   private val nextVector = Mux(isComparison, nextComparison, nextLanes.asUInt)
   private val reduced = if (supports(4)) Mux(op === VecOp.fredsum.U,
-    VectorFloat.add32(reduction, a), VectorFloat.max32(reduction, a)) else 0.U(32.W)
+    VectorFloat.add32Pipelined(reduction, a), VectorFloat.max32(reduction, a)) else 0.U(32.W)
+  if (supports(4)) {
+    when(op === VecOp.fredsum.U) { laneDone := arithmeticCycle === 4.U }
+  }
   private val nextReduction = Mux(active, reduced, reduction)
 
   when(io.flush) {
@@ -130,8 +145,9 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
       accumulated := Mux(compare, io.req.bits.vold.value(7, 0).pad(256), io.req.bits.vold.value)
       reduction := io.req.bits.vsrc1.value(31, 0)
       lane := 0.U
-      state := running
+      state := selectLane
     }
+    when(state === selectLane) { state := running }
     when(state === running && laneDone) {
       accumulated := nextVector
       reduction := nextReduction
@@ -144,6 +160,7 @@ class VectorUnit(p: XJParams, group: Int = -1) extends Module {
         state := complete
       }.otherwise {
         lane := lane + 1.U
+        state := selectLane
       }
     }
     when(io.resp.fire) { state := idle }

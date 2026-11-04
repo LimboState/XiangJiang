@@ -1,6 +1,7 @@
 package xiangjiang.backend.fu
 
 import chisel3._
+import chisel3.util._
 
 /** One physical cell in the 8x8 systolic array.
   *
@@ -83,16 +84,26 @@ class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
   private val bOperand = Mux(io.useStoredB, b, io.bIn)
   private val macResult = Wire(UInt(32.W))
   if (bf16) {
-    macResult := VectorFloat.fma32(
+    macResult := VectorFloat.fma32Pipelined(
       VectorFloat.widen(io.aIn), VectorFloat.widen(bOperand), addend)
   } else {
     val product = (io.aIn.asSInt * bOperand.asSInt).pad(32)
     macResult := (addend.asSInt + product).asUInt
   }
 
+  // Cancel all in-flight FMA results on prepare/flush. A recurrence must not
+  // launch again until the previous result has reached the accumulator.
+  private val writeResult = if (bf16) {
+    val pending = RegInit(VecInit(Seq.fill(VectorFloat.fma32PipelineStages)(false.B)))
+    pending(0) := io.macEnable
+    for (i <- 1 until VectorFloat.fma32PipelineStages) pending(i) := pending(i - 1)
+    when(io.clearPipe || io.loadAccumulator) { pending.foreach(_ := false.B) }
+    pending.last
+  } else io.macEnable
+
   when(io.loadAccumulator) {
     accumulator := io.accumulatorIn
-  }.elsewhen(io.macEnable && !io.clearPipe) {
+  }.elsewhen(writeResult && !io.clearPipe) {
     when(io.useAccumulator) {
       accumulator := macResult
     }.otherwise {

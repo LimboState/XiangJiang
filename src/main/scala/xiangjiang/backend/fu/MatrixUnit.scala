@@ -33,7 +33,13 @@ class MatrixArray(bf16: Boolean) extends Module {
   private val state = RegInit(idle)
   private val op = Reg(MatOp())
   private val ws = RegInit(false.B)
-  private val phase = RegInit(0.U(6.W))
+  private val phase = RegInit(0.U(7.W))
+  // Power-of-two cadence keeps edge scheduling to bit slices, not divide/modulo logic.
+  private val cadence = if (bf16) 1 << log2Ceil(VectorFloat.fma32PipelineStages + 1) else 1
+  // Neighbour links still advance every clock. Valid bubbles space successive
+  // k terms far enough apart for the pipelined accumulator feedback.
+  private val lastPair = 14 + 7 * cadence
+  private val lastCompute = lastPair + (if (bf16) VectorFloat.fma32PipelineStages else 0)
 
   // Architectural state is changed only by publish. Loads and computations
   // first write staging so a flush cannot expose speculative matrix state.
@@ -99,23 +105,27 @@ class MatrixArray(bf16: Boolean) extends Module {
     pe.io.accumulatorIn := Mux(op === MatOp.mmacc, acc(r * 8 + c), 0.U)
   }
 
-  // Output-stationary wavefront. A(i,k) enters row i from the west at i+k;
-  // B(k,j) enters column j from the north at j+k. Both values are registered
-  // at every PE, so equal k meets at PE(i,j) at i+j+k.
+  // Output-stationary wavefront. A(i,k) enters at i+k*cadence and B(k,j)
+  // at j+k*cadence. Registered links align equal k at i+j+k*cadence.
+  // INT8 cadence is one; BF16 bubbles respect the FMA feedback latency.
   for (r <- 0 until 8; c <- 0 until 8) {
     val pe = pes(r)(c)
     if (c == 0) {
-      val k = (phase - r.U)(2, 0)
+      val offset = phase - r.U
+      val k = (offset / cadence.U)(2, 0)
       pe.io.aIn := a(Cat(r.U(3.W), k))
-      pe.io.aInValid := state === computeOS && phase >= r.U && phase < (r + 8).U
+      pe.io.aInValid := state === computeOS && phase >= r.U &&
+        phase <= (r + 7 * cadence).U && (offset % cadence.U) === 0.U
     } else {
       pe.io.aIn := pes(r)(c - 1).io.aOut
       pe.io.aInValid := pes(r)(c - 1).io.aOutValid
     }
     if (r == 0) {
-      val k = (phase - c.U)(2, 0)
+      val offset = phase - c.U
+      val k = (offset / cadence.U)(2, 0)
       pe.io.bIn := b(Cat(k, c.U(3.W)))
-      pe.io.bInValid := state === computeOS && phase >= c.U && phase < (c + 8).U
+      pe.io.bInValid := state === computeOS && phase >= c.U &&
+        phase <= (c + 7 * cadence).U && (offset % cadence.U) === 0.U
     } else {
       pe.io.bIn := pes(r - 1)(c).io.bOut
       pe.io.bInValid := pes(r - 1)(c).io.bOutValid
@@ -185,7 +195,7 @@ class MatrixArray(bf16: Boolean) extends Module {
         pe.io.bIn := b(e)
         pe.io.aInValid := true.B
         pe.io.bInValid := true.B
-        pe.io.macEnable := true.B
+        pe.io.macEnable := phase === 0.U
         pe.io.useAccumulator := true.B
       }.otherwise {
         staging(e) := (if (bf16) VectorFloat.widen(a(c * 8 + r))
@@ -230,7 +240,7 @@ class MatrixArray(bf16: Boolean) extends Module {
       .otherwise { phase := phase + 1.U }
   }
   when(state === computeOS) {
-    when(phase === 21.U) { state := complete }
+    when(phase === lastCompute.U) { state := complete }
       .otherwise { phase := phase + 1.U }
   }
   when(state === computeWS) {
@@ -238,7 +248,10 @@ class MatrixArray(bf16: Boolean) extends Module {
       .otherwise { phase := phase + 1.U }
   }
   when(state === captureWS) { state := complete }
-  when(state === elementwise) { state := complete }
+  when(state === elementwise) {
+    when(phase === (if (bf16) VectorFloat.fma32PipelineStages else 0).U) { state := complete }
+      .otherwise { phase := phase + 1.U }
+  }
   when(state === complete) { state := idle }
 
   when(io.publish.valid && !io.flush) {
