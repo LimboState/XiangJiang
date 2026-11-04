@@ -569,6 +569,43 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     }
   }
 
+  test("registered branch wakeup cannot bypass into issue and captures dispatch-time wakeup") {
+    simulate(new IssueUnit(XJParams(nIssue = 3), headOnly = true, issueOnWakeup = false)) { dut =>
+      initIssue(dut)
+      val producer = Tag(4, 2)
+      val first = Allocation(Tag(0, 0), 0)
+      val second = Allocation(Tag(1, 0), 1)
+      enqueue(dut, first, src1Ready = false, src1Tag = producer)
+      dut.io.head.valid.poke(true.B)
+      pokeTag(dut.io.head.bits, first.tag)
+      dut.io.issue.ready.poke(true.B)
+      pokeResult(dut.io.wakeup.bits, Allocation(producer, 0), 444)
+      dut.io.wakeup.valid.poke(true.B)
+      pokeIssue(dut.io.dispatch.bits, second, src1Ready = false, src1Tag = producer)
+      dut.io.dispatch.valid.poke(true.B)
+      // No combinational valid or operand bypass to the branch execution path.
+      dut.io.issue.valid.expect(false.B)
+      dut.clock.step()
+      dut.io.dispatch.valid.poke(false.B)
+      dut.io.wakeup.valid.poke(false.B)
+      dut.io.issue.valid.expect(true.B)
+      expectTag(dut.io.issue.bits.uop.tag, first.tag)
+      dut.io.issue.bits.src1.value.expect(444.U)
+      dut.clock.step()
+      pokeTag(dut.io.head.bits, second.tag)
+      dut.io.issue.valid.expect(true.B)
+      dut.io.issue.bits.src1.value.expect(444.U)
+      dut.io.issue.ready.poke(false.B)
+      dut.clock.step(2)
+      dut.io.issue.bits.src1.value.expect(444.U)
+      dut.io.flush.poke(true.B)
+      dut.io.issue.valid.expect(false.B)
+      dut.clock.step()
+      dut.io.flush.poke(false.B)
+      dut.io.empty.expect(true.B)
+    }
+  }
+
   test("head-only issue requires the complete ROB tag and flush frees a full single-entry station") {
     simulate(new IssueUnit(XJParams(nIssue = 1), headOnly = true)) { dut =>
       initIssue(dut)

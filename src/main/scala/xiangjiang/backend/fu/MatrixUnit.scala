@@ -4,9 +4,10 @@ import chisel3._
 import chisel3.util._
 import xiangjiang._
 
-/** Physical 8x8 PE array with committed and working state. OS keeps each
-  * output stationary over k; INT8 WS keeps B[k,j] at PE[k,j] and routes one
-  * output row's partial sums down the k dimension. Both preserve k order.
+/** Physical 8x8 systolic array with committed and working state.
+  * A always advances west-to-east and B advances north-to-south. BF16 uses
+  * output-stationary (OS); INT8 selects OS or weight-stationary (WS) while
+  * reusing the same PE multipliers, adders, and registered neighbour links.
   */
 class MatrixArrayIO extends Bundle {
   val loadBeat = Input(Valid(new Bundle {
@@ -26,19 +27,28 @@ class MatrixArrayIO extends Bundle {
 
 class MatrixArray(bf16: Boolean) extends Module {
   val io = IO(new MatrixArrayIO)
-  val width = if (bf16) 16 else 8
-  val a = RegInit(VecInit(Seq.fill(64)(0.U(width.W))))
-  val b = RegInit(VecInit(Seq.fill(64)(0.U(width.W))))
-  val acc = RegInit(VecInit(Seq.fill(64)(0.U(32.W))))
-  val valid = RegInit(VecInit(Seq.fill(3)(false.B)))
-  val staging = Reg(Vec(64, UInt(32.W)))
-  val busy = RegInit(false.B)
-  val op = Reg(MatOp())
-  val phase = Reg(UInt(3.W))
-  val mode = Reg(Bool())
+  private val width = if (bf16) 16 else 8
+  private val Seq(idle, prepare, loadWeights, computeOS, computeWS, captureWS,
+    elementwise, complete) = Enum(8)
+  private val state = RegInit(idle)
+  private val op = Reg(MatOp())
+  private val ws = RegInit(false.B)
+  private val phase = RegInit(0.U(6.W))
+
+  // Architectural state is changed only by publish. Loads and computations
+  // first write staging so a flush cannot expose speculative matrix state.
+  private val a = RegInit(VecInit(Seq.fill(64)(0.U(width.W))))
+  private val b = RegInit(VecInit(Seq.fill(64)(0.U(width.W))))
+  private val acc = RegInit(VecInit(Seq.fill(64)(0.U(32.W))))
+  private val valid = RegInit(VecInit(Seq.fill(3)(false.B)))
+  private val staging = RegInit(VecInit(Seq.fill(64)(0.U(32.W))))
+  private val pes = Seq.tabulate(8, 8) { (_, _) =>
+    Module(new SystolicPE(width, bf16))
+  }
+
   io.validBuffers := valid
-  io.busy := busy
-  io.start.ready := !busy && !io.flush
+  io.busy := state =/= idle
+  io.start.ready := state === idle && !io.flush
 
   when(io.loadBeat.valid && !io.flush) {
     for (e <- 0 until 64) {
@@ -47,18 +57,21 @@ class MatrixArray(bf16: Boolean) extends Module {
         (e % inputPerBeat) * width)
       if (bf16) {
         when(io.loadBeat.bits.beat === (e / 32).U) {
-          staging(e) := Mux(io.loadBeat.bits.buffer === 2.U, VectorFloat.widen(inputValue), inputValue)
+          staging(e) := Mux(io.loadBeat.bits.buffer === 2.U,
+            VectorFloat.widen(inputValue), inputValue)
         }
       } else {
         when(io.loadBeat.bits.buffer =/= 2.U && io.loadBeat.bits.beat === 0.U) {
           staging(e) := inputValue
         }
         when(io.loadBeat.bits.buffer === 2.U && io.loadBeat.bits.beat === (e / 16).U) {
-          staging(e) := io.loadBeat.bits.data((e % 16 + 1) * 32 - 1, (e % 16) * 32)
+          staging(e) := io.loadBeat.bits.data((e % 16 + 1) * 32 - 1,
+            (e % 16) * 32)
         }
       }
     }
   }
+
   if (bf16) {
     io.storeData := VecInit((0 until 32).map(i =>
       VectorFloat.narrow(acc(Cat(io.storeBeat(0), i.U(5.W)))))).asUInt
@@ -67,40 +80,167 @@ class MatrixArray(bf16: Boolean) extends Module {
       acc(Cat(io.storeBeat(1, 0), i.U(4.W))))).asUInt
   }
 
-  when(io.start.fire) {
-    op := io.start.bits.op
-    phase := 0.U
-    mode := io.mode
-    for (e <- 0 until 64) { staging(e) := Mux(io.start.bits.op === MatOp.mmacc, acc(e), 0.U) }
-    busy := true.B
+  // Defaults. Every matrix product below uses only nearest-neighbour PE links.
+  for ((row, r) <- pes.zipWithIndex; (pe, c) <- row.zipWithIndex) {
+    pe.io.aIn := 0.U
+    pe.io.bIn := 0.U
+    pe.io.aInValid := false.B
+    pe.io.bInValid := false.B
+    pe.io.tagIn := 0.U
+    pe.io.moveA := false.B
+    pe.io.moveB := false.B
+    pe.io.clearPipe := io.flush || state === prepare
+    pe.io.sumIn := 0.U
+    pe.io.sumInValid := false.B
+    pe.io.macEnable := false.B
+    pe.io.useAccumulator := false.B
+    pe.io.useStoredB := false.B
+    pe.io.loadAccumulator := state === prepare
+    pe.io.accumulatorIn := Mux(op === MatOp.mmacc, acc(r * 8 + c), 0.U)
   }
-  val pes = Seq.fill(64)(Module(new MatrixPE(bf16)))
-  val multiply = op === MatOp.mmul || op === MatOp.mmacc
-  val ws = if (bf16) false.B else mode && multiply
+
+  // Output-stationary wavefront. A(i,k) enters row i from the west at i+k;
+  // B(k,j) enters column j from the north at j+k. Both values are registered
+  // at every PE, so equal k meets at PE(i,j) at i+j+k.
   for (r <- 0 until 8; c <- 0 until 8) {
-    val e = r * 8 + c
-    val pe = pes(e)
-    val osA = Mux(multiply, a(Cat(r.U(3.W), phase)), a(e))
-    val osB = Mux(multiply, b(Cat(phase, c.U(3.W))), b(e))
-    pe.io.a := Mux(busy, Mux(ws, a(Cat(phase, r.U(3.W))), osA), 0.U)
-    pe.io.b := Mux(busy, Mux(ws, b(e), osB), 0.U)
-    val wsSum = if (r == 0) Mux(op === MatOp.mmacc, acc(Cat(phase, c.U(3.W))), 0.U)
-      else pes((r - 1) * 8 + c).io.result
-    pe.io.sum := Mux(ws, wsSum, staging(e))
-    pe.io.multiplyOnly := op === MatOp.mew
-    val transposed = if (bf16) VectorFloat.widen(a(c * 8 + r))
-      else a(c * 8 + r).asSInt.pad(32).asUInt
-    when(busy) {
-      when(ws) {
-        when(phase === r.U) { staging(e) := pes(56 + c).io.result }
-      }.otherwise {
-        staging(e) := Mux(op === MatOp.mtrans, transposed, pe.io.result)
+    val pe = pes(r)(c)
+    if (c == 0) {
+      val k = (phase - r.U)(2, 0)
+      pe.io.aIn := a(Cat(r.U(3.W), k))
+      pe.io.aInValid := state === computeOS && phase >= r.U && phase < (r + 8).U
+    } else {
+      pe.io.aIn := pes(r)(c - 1).io.aOut
+      pe.io.aInValid := pes(r)(c - 1).io.aOutValid
+    }
+    if (r == 0) {
+      val k = (phase - c.U)(2, 0)
+      pe.io.bIn := b(Cat(k, c.U(3.W)))
+      pe.io.bInValid := state === computeOS && phase >= c.U && phase < (c + 8).U
+    } else {
+      pe.io.bIn := pes(r - 1)(c).io.bOut
+      pe.io.bInValid := pes(r - 1)(c).io.bOutValid
+    }
+    when(state === computeOS) {
+      pe.io.moveA := true.B
+      pe.io.moveB := true.B
+      pe.io.macEnable := pe.io.aInValid && pe.io.bInValid
+      pe.io.useAccumulator := true.B
+    }
+  }
+
+  if (!bf16) {
+    // WS preload: send B rows in reverse order from the north. After eight
+    // registered shifts PE(k,j) owns B(k,j). No separate weight memory or MAC
+    // array is used.
+    for (r <- 0 until 8; c <- 0 until 8) {
+      val pe = pes(r)(c)
+      when(state === loadWeights) {
+        if (r == 0) {
+          pe.io.bIn := b(Cat(7.U(3.W) - phase(2, 0), c.U(3.W)))
+          pe.io.bInValid := true.B
+        } else {
+          pe.io.bIn := pes(r - 1)(c).io.bOut
+          pe.io.bInValid := pes(r - 1)(c).io.bOutValid
+        }
+        pe.io.moveB := true.B
+      }
+
+      // For output row i, A(i,k) is injected into PE row k at cycle i+k.
+      // A moves east while the registered partial sum moves south. The bottom
+      // row emits C(i,j); tags preserve i while columns have different skew.
+      when(state === computeWS) {
+        if (c == 0) {
+          val outputRow = (phase - r.U)(2, 0)
+          pe.io.aIn := a(Cat(outputRow, r.U(3.W)))
+          pe.io.aInValid := phase >= r.U && phase < (r + 8).U
+          pe.io.tagIn := outputRow
+        } else {
+          pe.io.aIn := pes(r)(c - 1).io.aOut
+          pe.io.aInValid := pes(r)(c - 1).io.aOutValid
+          pe.io.tagIn := pes(r)(c - 1).io.tagOut
+        }
+        if (r == 0) {
+          pe.io.sumIn := Mux(op === MatOp.mmacc,
+            acc(Cat(pe.io.tagIn, c.U(3.W))), 0.U)
+          pe.io.sumInValid := pe.io.aInValid
+        } else {
+          pe.io.sumIn := pes(r - 1)(c).io.sumOut
+          pe.io.sumInValid := pes(r - 1)(c).io.sumOutValid
+        }
+        pe.io.moveA := true.B
+        pe.io.macEnable := pe.io.aInValid && pe.io.sumInValid
+        pe.io.useStoredB := true.B
       }
     }
   }
-  when(busy) {
-    when(!multiply || phase === 7.U) { busy := false.B }.otherwise { phase := phase + 1.U }
+
+  // MEW reuses each PE's one MAC with a zero addend. MTRANS is a data move,
+  // not an alternative matrix-multiplication datapath or a reduction tree.
+  when(state === elementwise) {
+    for (r <- 0 until 8; c <- 0 until 8) {
+      val e = r * 8 + c
+      val pe = pes(r)(c)
+      when(op === MatOp.mew) {
+        pe.io.aIn := a(e)
+        pe.io.bIn := b(e)
+        pe.io.aInValid := true.B
+        pe.io.bInValid := true.B
+        pe.io.macEnable := true.B
+        pe.io.useAccumulator := true.B
+      }.otherwise {
+        staging(e) := (if (bf16) VectorFloat.widen(a(c * 8 + r))
+          else a(c * 8 + r).asSInt.pad(32).asUInt)
+      }
+    }
   }
+
+  // WS results leave the bottom row over several skewed cycles. Capture each
+  // registered result by its propagated output-row tag.
+  when(state === computeWS || state === captureWS) {
+    for (c <- 0 until 8) {
+      val bottom = pes(7)(c)
+      when(bottom.io.sumOutValid) {
+        staging(Cat(bottom.io.tagOut, c.U(3.W))) := bottom.io.sumOut
+      }
+    }
+  }
+
+  // OS and MEW results are held in the PE-local accumulator until copied.
+  when(state === complete && !io.flush &&
+    (op === MatOp.mmul || op === MatOp.mmacc || op === MatOp.mew) && !ws) {
+    for (r <- 0 until 8; c <- 0 until 8) {
+      staging(r * 8 + c) := pes(r)(c).io.accumulator
+    }
+  }
+
+  when(io.start.fire) {
+    op := io.start.bits.op
+    ws := (if (bf16) false.B else io.mode) &&
+      (io.start.bits.op === MatOp.mmul || io.start.bits.op === MatOp.mmacc)
+    phase := 0.U
+    state := prepare
+  }
+  when(state === prepare) {
+    phase := 0.U
+    state := Mux(op === MatOp.mmul || op === MatOp.mmacc,
+      Mux(ws, loadWeights, computeOS), elementwise)
+  }
+  when(state === loadWeights) {
+    when(phase === 7.U) { phase := 0.U; state := computeWS }
+      .otherwise { phase := phase + 1.U }
+  }
+  when(state === computeOS) {
+    when(phase === 21.U) { state := complete }
+      .otherwise { phase := phase + 1.U }
+  }
+  when(state === computeWS) {
+    when(phase === 21.U) { state := captureWS }
+      .otherwise { phase := phase + 1.U }
+  }
+  when(state === captureWS) { state := complete }
+  when(state === elementwise) { state := complete }
+  when(state === complete) { state := idle }
+
   when(io.publish.valid && !io.flush) {
     valid(io.publish.bits) := true.B
     for (e <- 0 until 64) {
@@ -109,7 +249,7 @@ class MatrixArray(bf16: Boolean) extends Module {
       when(io.publish.bits === 2.U) { acc(e) := staging(e) }
     }
   }
-  when(io.flush) { busy := false.B }
+  when(io.flush) { state := idle }
 }
 
 /** One head-authorized task, retained until its matching ROB commit. */

@@ -37,7 +37,7 @@ class ScalarCore(p: XJParams) extends Module {
   val rename = Module(new RenameStage(p))
   val rob = Module(new Rob(p))
   val aluIssue = Module(new IssueUnit(p))
-  val branchIssue = Module(new IssueUnit(p, headOnly = true))
+  val branchIssue = Module(new IssueUnit(p, headOnly = true, issueOnWakeup = false))
   val vectorIssues = Seq.fill(5)(Module(new IssueUnit(p, vectorEnabled = true)))
   val matrixIssue = Module(new IssueUnit(p, headOnly = true))
   val dmaIssue = Module(new IssueUnit(p, headOnly = true))
@@ -255,18 +255,27 @@ class ScalarCore(p: XJParams) extends Module {
   completion(6).valid := dma.io.result.valid && dmaConfigActive
   completion(6).bits := dma.io.result.bits
   dma.io.result.ready := Mux(dmaConfigActive, completion(6).ready, lsu.io.dmaResult.ready)
-  val have = Wire(Vec(12, Bool()))
-  val pick = Wire(Vec(12, UInt(4.W)))
-  have(0) := false.B
-  pick(0) := 0.U
-  for (i <- 0 until 11) {
-    val take = completion(i).valid && (!have(i) || completion(i).bits.seq < completion(pick(i)).bits.seq)
-    have(i + 1) := have(i) || completion(i).valid
-    pick(i + 1) := Mux(take, i.U, pick(i))
-    completion(i).ready := have(11) && pick(11) === i.U
+  // Balanced oldest-first tournament: carry the sequence through each node
+  // instead of repeatedly indexing the entire completion bus. Eleven sources
+  // require four comparison levels, rather than a serial chain of ten.
+  // Ties select the left (lower-index) source, as in the original arbiter.
+  def oldestCompletion(nodes: Seq[(Bool, UInt, UInt)]): (Bool, UInt, UInt) = {
+    if (nodes.size == 1) nodes.head
+    else oldestCompletion(nodes.grouped(2).map {
+      case Seq(left, right) =>
+        val takeRight = right._1 && (!left._1 || right._2 < left._2)
+        (left._1 || right._1, Mux(takeRight, right._2, left._2),
+          Mux(takeRight, right._3, left._3))
+      case Seq(single) => single
+    }.toSeq)
   }
-  rob.io.wb.valid := have(11)
-  rob.io.wb.bits := completion(pick(11)).bits
+  val (completionValid, _, completionIndex) = oldestCompletion(
+    (0 until 11).map(i => (completion(i).valid, completion(i).bits.seq, i.U(4.W))))
+  for (i <- 0 until 11) {
+    completion(i).ready := completionValid && completionIndex === i.U
+  }
+  rob.io.wb.valid := completionValid
+  rob.io.wb.bits := completion(completionIndex).bits
   val broadcast = Wire(Valid(new ExeResult(p)))
   broadcast.valid := rob.io.wbAccepted
   broadcast.bits := rob.io.wb.bits

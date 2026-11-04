@@ -5,7 +5,8 @@ import chisel3.util._
 import xiangjiang._
 
 /** Reservation station selecting the oldest ready sequence number, not slot. */
-class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean = false) extends Module {
+class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean = false,
+    issueOnWakeup: Boolean = true) extends Module {
   val io = IO(new Bundle {
     val dispatch = Flipped(Decoupled(new IssueEntry(p)))
     val wakeup = Input(Valid(new ExeResult(p)))
@@ -58,7 +59,18 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
         (!entries(i).uop.usesVOld || awakened(i).vold.ready) &&
         (!entries(i).uop.usesVMask || awakened(i).vmask.ready)
     } else true.B
-    eligible(i) := valid(i) && awakened(i).src1.ready && awakened(i).src2.ready && vectorReady && atHead
+    // Timing-sensitive units may capture a wakeup this cycle but wait until the
+    // following cycle to issue it. This inserts a register boundary between
+    // ROB writeback acceptance and the functional-unit result datapath.
+    val scalarReady = if (issueOnWakeup) awakened(i).src1.ready && awakened(i).src2.ready
+      else entries(i).src1.ready && entries(i).src2.ready
+    val issueVectorReady = if (issueOnWakeup) vectorReady else if (vectorEnabled) {
+      (!entries(i).uop.usesV1 || entries(i).vsrc1.ready) &&
+        (!entries(i).uop.usesV2 || entries(i).vsrc2.ready) &&
+        (!entries(i).uop.usesVOld || entries(i).vold.ready) &&
+        (!entries(i).uop.usesVMask || entries(i).vmask.ready)
+    } else true.B
+    eligible(i) := valid(i) && scalarReady && issueVectorReady && atHead
   }
 
   var found: Bool = false.B
@@ -72,7 +84,7 @@ class IssueUnit(p: XJParams, headOnly: Boolean = false, vectorEnabled: Boolean =
   }
   val selected = oldest
   io.issue.valid := !io.flush && found
-  io.issue.bits := awakened(selected)
+  io.issue.bits := (if (issueOnWakeup) awakened(selected) else entries(selected))
   io.dispatch.ready := !io.flush && !valid.asUInt.andR
   io.empty := !valid.asUInt.orR
   val freeIndex = Wire(UInt(indexBits.W))
