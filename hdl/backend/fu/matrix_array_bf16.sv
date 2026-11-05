@@ -42,8 +42,7 @@ module matrix_array_bf16 (
     logic [15:0] d_b [8][8];
     logic d_a_valid [8][8];
     logic d_b_valid [8][8];
-    logic [31:0] w_narrow_input [32];
-    logic [15:0] w_narrow_result [32];
+    logic [15:0] w_narrow_result [64];
     for (genvar g_row = 0; g_row < 8; g_row++) begin : gen_row
         for (genvar g_column = 0; g_column < 8; g_column++) begin : gen_column
             systolic_pe_bf16 i_systolic_pe_bf16 (
@@ -63,15 +62,18 @@ module matrix_array_bf16 (
             );
         end
     end
-    for (genvar g_index = 0; g_index < 32; g_index++) begin : gen_narrow
-        logic [31:0] w_unused_int;
-        logic [31:0] w_unused_float;
-        assign w_narrow_input[g_index] = f_acc[{store_beat[0], 5'(g_index)}];
-        fp_convert i_fp_convert (
-            .value(w_narrow_input[g_index]), .narrow(w_narrow_result[g_index]),
-            .from_int(w_unused_float), .to_int(w_unused_int)
+    // Narrow all committed accumulator elements before the beat select. This
+    // keeps store_beat out of the FP32 classification/rounding cone; the
+    // timing path to DTCM contains only a 2:1 mux after each narrow result.
+    for (genvar g_index = 0; g_index < 64; g_index++) begin : gen_narrow
+        bf16_narrow_fast i_bf16_narrow_fast (
+            .value(f_acc[g_index]),
+            .result(w_narrow_result[g_index])
         );
-        assign store_data[16*g_index+:16] = w_narrow_result[g_index];
+    end
+    for (genvar g_index = 0; g_index < 32; g_index++) begin : gen_store_word
+        assign store_data[16*g_index+:16] = store_beat[0]
+            ? w_narrow_result[g_index+32] : w_narrow_result[g_index];
     end
     always_comb begin
         start_ready = f_state == ST_IDLE && !flush;

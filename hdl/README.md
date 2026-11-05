@@ -139,6 +139,7 @@ python hdl/check_standalone.py
 |验证|结果|
 |---|---|
 |顶层严格 lint|普通模式和 `-DSYNTHESIS` 均通过|
+|BF16 快速窄化|1,869,492 个输入与原通用窄化路径对照通过|
 |完整 NPU 差分|15,759 cycles，60 个程序，567 retirements；DMA AR/AW 各 5 次|
 |独立复制目录|无 src/generated 依赖，完成同一批 60 个程序的功能检查|
 |Vector 5 组差分|各 120,000 cycles，含流水浮点、转换、除法、掩码、置换/归约|
@@ -153,6 +154,9 @@ python hdl/check_standalone.py
 整机程序包含循环、分支源/目的重叠、代际耗尽、精确异常和重启，全部 36 类 Vector
 寄存器运算编码及 VLD/VST，三套矩阵阵列的装载/计算/存储，二维 DMA、外部错误和 poison。
 这不是穷举覆盖率报告。无效负载不要求对照；生成实例优化掉的字段不能凭此测试证明。
+针对 Vivado 报告中全部 1,792 条 `f_beat → BF16 narrow → DTCM` 违例，矩阵存储路径
+将 FP32→BF16 化简为同指数格式的直接 RNE，并把 64 元素窄化放在 beat 选择之前，
+使 `store_beat` 只驱动末级 2:1 mux；接口周期和 MSTORE 握手未改变。
 例如 Rename 差分只对照译码器实际使用的 `mask_reg=0`；MemorySubsystem 差分使用
 Core 的全字/全 beat mask，底层 byte mask 另有 SRAM 测试。
 

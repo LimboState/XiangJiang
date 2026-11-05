@@ -26,10 +26,8 @@ module fp_convert (
         .value(value), .sign(w_sign), .is_nan(w_nan), .is_inf(w_inf), .is_zero(w_zero),
         .normalized(w_normalized), .exponent(w_exponent)
     );
-    fp_round #(.G_PRECISION(8), .G_WIDTH(27), .G_PIPELINED(1'b0)) i_narrow (
-        .clk(1'b0), .magnitude({w_normalized, 3'd0}), .scale(w_exponent - 12'sd26),
-        .sign(w_sign), .special(w_nan || w_inf),
-        .special_value(w_nan ? 16'h7fc0 : {w_sign, 15'h7f80}), .result(narrow)
+    bf16_narrow_fast i_bf16_narrow_fast (
+        .value(value), .result(narrow)
     );
     fp_round #(.G_PRECISION(24), .G_WIDTH(35), .G_PIPELINED(1'b0)) i_from_int (
         .clk(1'b0), .magnitude({d_magnitude, 3'd0}), .scale(-12'sd3),

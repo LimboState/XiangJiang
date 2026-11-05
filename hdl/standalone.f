@@ -13,6 +13,7 @@ backend/fu/fp_round.sv
 backend/fu/fp_sum_pipeline.sv
 backend/fu/fp_arithmetic.sv
 backend/fu/fp_compare.sv
+backend/fu/bf16_narrow_fast.sv
 backend/fu/fp_convert.sv
 backend/fu/vector_unit.sv
 backend/fu/systolic_pe_int8.sv

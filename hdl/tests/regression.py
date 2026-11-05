@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parents[2]
 os.chdir(root)
 for script in ('run_checks.py', 'check_decode.py', 'check_control.py', 'check_rename.py',
                'check_rob.py', 'check_dma.py', 'check_lsu.py', 'check_memory_subsystem.py',
-               'check_vector.py', 'check_matrix.py', 'check_npu.py'):
+               'check_narrow.py', 'check_vector.py', 'check_matrix.py', 'check_npu.py'):
     print(f'=== {script} ===', flush=True)
     subprocess.run([sys.executable, str(root / 'hdl/tests' / script)], check=True)
 
