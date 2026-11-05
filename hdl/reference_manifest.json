@@ -1,7 +1,10 @@
 {
-  "git_head": "8be53b7eb667f6d2d0f78eee165c261a649106d1",
+  "git_head": "03b762406343c6360ee693721bddaa624f96c2fd",
   "command": "./mill xj.runMain top.Generate generated/hdl-reference",
+  "configuration": "XJParams() defaults; see generated/hdl-reference/xiangjiang-config.json",
   "sha256": {
+    "docs/xj-isa.md": "a6ed709c6c9a252bb85130205c2d6fd8ba1f20c0215746098e42340ffc513d7b",
+    "docs/xj-npu.md": "5ac03b03583808298305dd040139acd5f18b76a5a4e396d3f2c8a5101e1ad58f",
     "src/main/scala/device/AXI.scala": "4a673600cf08376a2bcd019cc4597e0ad3ff1d3e639e2199db9804de83579608",
     "src/main/scala/device/ControlRegisters.scala": "c736c2f2c6f1804e3a7057aa41e7d0c5ac8f2b0d52f90750841d2da6e7f75b7a",
     "src/main/scala/device/MemorySubsystem.scala": "03c626b3a57cc3acfba1ed5bc831918d64104e1a3e3a131902ddad9dfc9a7568",
@@ -23,9 +26,7 @@
     "src/main/scala/xiangjiang/frontend/Frontend.scala": "3ed82860541370158791681ce538a0757d55b1ff35bcfd27a332f72b3d6d5385",
     "src/main/scala/xiangjiang/mem/DmaEngine.scala": "3440a62d6948247d2ab5a657eeaa017189376ad17e61df87b3287d8bcace3a7d",
     "src/main/scala/xiangjiang/mem/LSU.scala": "1542e5fb051adecb26037df75847965d39eef814e79f36f1b2c810ded7cf2ad1",
-    "src/main/scala/xiangjiang/mem/TCM.scala": "32dbb252ea039e37cff358ddc6fcad90529010bdc8db76475197457e2d8c46ef",
-    "docs/xj-isa.md": "a6ed709c6c9a252bb85130205c2d6fd8ba1f20c0215746098e42340ffc513d7b",
-    "docs/xj-npu.md": "5ac03b03583808298305dd040139acd5f18b76a5a4e396d3f2c8a5101e1ad58f"
+    "src/main/scala/xiangjiang/mem/TCM.scala": "32dbb252ea039e37cff358ddc6fcad90529010bdc8db76475197457e2d8c46ef"
   },
   "generated_sha256": {
     "generated/hdl-reference/ALUUnit.sv": "aa7dd39e35550b1bfd7ca9883a6bc5fe53db781cb4e4339f751d98c801e5b65b",

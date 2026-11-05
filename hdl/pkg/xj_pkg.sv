@@ -6,6 +6,25 @@ package xj_pkg;
     localparam int C_GENERATION_WIDTH = 4;
     localparam int C_SEQUENCE_WIDTH = 16;
     localparam int C_VECTOR_WIDTH = 256;
+    localparam int C_AXI_ID_WIDTH = 4;
+    typedef enum logic [4:0] {
+        C_FAULT_NONE = 5'd0,
+        C_FAULT_LOAD_ALIGN = 5'd4,
+        C_FAULT_LOAD_ACCESS = 5'd5,
+        C_FAULT_STORE_ALIGN = 5'd6,
+        C_FAULT_STORE_ACCESS = 5'd7,
+        C_FAULT_VECTOR_LOAD_ALIGN = 5'd8,
+        C_FAULT_VECTOR_LOAD_ACCESS = 5'd9,
+        C_FAULT_VECTOR_STORE_ALIGN = 5'd10,
+        C_FAULT_VECTOR_STORE_ACCESS = 5'd11,
+        C_FAULT_MATRIX_ALIGN = 5'd12,
+        C_FAULT_MATRIX_ACCESS = 5'd13,
+        C_FAULT_MATRIX_STATE = 5'd14,
+        C_FAULT_DMA_CONFIG = 5'd15,
+        C_FAULT_DMA_READ = 5'd16,
+        C_FAULT_DMA_WRITE = 5'd17,
+        C_FAULT_DMA_PROTOCOL = 5'd18
+    } fault_code_t;
 
     typedef enum logic [5:0] {
         OP_ADD = 6'd0, OP_SUB = 6'd1, OP_AND = 6'd2, OP_OR = 6'd3,
@@ -103,6 +122,15 @@ package xj_pkg;
         logic [31:0] bad_addr;
     } fetch_packet_t;
     typedef struct packed {
+        micro_op_t uop;
+        logic [C_VECTOR_WIDTH-1:0] data;
+        logic exception;
+        logic [4:0] cause;
+        logic [31:0] bad_addr;
+        logic [31:0] detail;
+        logic [31:0] next_pc;
+    } commit_record_t;
+    typedef struct packed {
         logic [31:0] row_bytes;
         logic [31:0] rows;
         logic [31:0] external_stride;
@@ -125,5 +153,62 @@ package xj_pkg;
         logic [31:0] fault_detail;
         dma_status_t dma;
     } core_status_t;
+    typedef struct packed {
+        logic [31:0] addr;
+        logic [31:0] data;
+        logic write;
+        logic [3:0] mask;
+    } word_req_t;
+    typedef struct packed {
+        logic [31:0] data;
+        logic error;
+    } word_resp_t;
+    typedef struct packed {
+        logic [31:0] addr;
+        logic [511:0] data;
+        logic write;
+        logic [63:0] mask;
+    } matrix_beat_req_t;
+    typedef struct packed {
+        logic [511:0] data;
+        logic error;
+    } matrix_beat_resp_t;
+    typedef struct packed {
+        rob_tag_t tag;
+        mat_op_t op;
+        logic [1:0] unit;
+        logic [1:0] buffer;
+        logic [31:0] addr;
+    } matrix_task_t;
+    typedef struct packed {
+        logic [1:0] unit;
+        logic mode;
+    } matrix_config_t;
+    typedef struct packed {
+        logic [C_AXI_ID_WIDTH-1:0] id;
+        logic [31:0] addr;
+        logic [7:0] len;
+        logic [2:0] size;
+        logic [1:0] burst;
+        logic lock;
+        logic [3:0] cache;
+        logic [2:0] prot;
+        logic [3:0] qos;
+    } axi_address_t;
+    typedef struct packed {
+        logic [31:0] data;
+        logic [3:0] strb;
+        logic last;
+    } axi_write_data_t;
+    typedef struct packed {
+        logic [C_AXI_ID_WIDTH-1:0] id;
+        logic [1:0] resp;
+    } axi_write_response_t;
+    typedef struct packed {
+        logic [C_AXI_ID_WIDTH-1:0] id;
+        logic [31:0] data;
+        logic [1:0] resp;
+        logic last;
+    } axi_read_data_t;
 endpackage
 `default_nettype wire
