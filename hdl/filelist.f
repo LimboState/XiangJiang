@@ -1,0 +1,10 @@
+hdl/pkg/xj_pkg.sv
+hdl/device/control_registers.sv
+hdl/backend/decode/decode_unit.sv
+hdl/backend/fu/scalar_completion.sv
+hdl/backend/fu/alu_unit.sv
+hdl/backend/fu/branch_unit.sv
+hdl/frontend/frontend.sv
+hdl/backend/issue/issue_unit.sv
+hdl/mem/instruction_tcm.sv
+hdl/mem/data_tcm.sv

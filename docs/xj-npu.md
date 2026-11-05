@@ -564,52 +564,8 @@ RUNNING --protocol poison--> BUS_POISONED --platform reset--> IDLE
 12. tag/seq 回绕前必须消除所有迟到响应歧义。
 13. 声明的已实现能力不得大于已完成 RTL 和验证的集合。
 
-## 13. 当前 Scalar-only RTL
 
-当前 RTL 只实现 XJ-ISA 的 33 条 Scalar 指令，不包含 Vector、Matrix、Core DMA、外部 AXI Manager、cache、特权架构或分支预测器。
-
-### 13.1. 模块组织
-
-相对于 RTL 工程的 `src/main/scala`：
-
-|模块|职责|
-|---|---|
-|`xiangjiang/Parameters.scala`、`Bundle.scala`|参数、ROBTag、操作数和完成记录|
-|`xiangjiang/frontend/Frontend.scala`|同步 ITCM 请求、取指缓冲、屏障和重定向|
-|`xiangjiang/backend/decode/DecodeUnit.scala`|Scalar 严格译码|
-|`xiangjiang/backend/rename/RenameStage.scala`|X ARF、RAT、源捕获和旁路|
-|`xiangjiang/backend/issue/IssueUnit.scala`|ALU/Branch RS 和最老就绪发射|
-|`xiangjiang/backend/fu/FunctionalUnit.scala`|ALUUnit、BranchUnit|
-|`xiangjiang/backend/rob/Rob.scala`|ROB 和 Scalar Result Pool|
-|`xiangjiang/mem/LSU.scala`|有序 MemQ 和单活动访问|
-|`xiangjiang/mem/TCM.scala`|ITCM/DTCM|
-|`xiangjiang/ScalarCore.scala`|派发、CDB、提交和故障清理|
-|`device/*`|Host AXI/控制寄存器/存储器适配器|
-|`top/*`|平台集成和 RTL 生成|
-
-### 13.2. 默认参数
-
-|参数|当前默认值|
-|---|---:|
-|ROB|8|
-|ALU/Branch RS|各 4|
-|Scalar Result Slot|6|
-|MemQ|4|
-|generation/seq|4/16 bit|
-|Host AXI address/data/ID|32/32/4 bit|
-
-### 13.3. 构建与验证
-
-在 RTL 仓库根目录：
-
-```bash
-./mill xj.test
-./mill xj.runMain top.Generate generated
-```
-
-当前已记录的验证结果为 6 个测试套件、30 项仿真通过，覆盖 Scalar 译码/ALU/分支、ROB/结果槽、重命名冒险、迟到标签、回绕排空、有序 LSU、DTCM bank、Host AXI、精确故障、ACK 和重启。该结果只证明 Scalar-only 实现，不证明目标 Vector/Matrix/DMA 已实现。
-
-## 14. 参考资料
+## 13. 参考资料
 
 - [XJ-ISA](xj-isa.md)
 - [RISC-V Unprivileged ISA](https://docs.riscv.org/reference/isa/unpriv/)
