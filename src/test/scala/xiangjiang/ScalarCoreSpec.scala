@@ -26,7 +26,22 @@ class ScalarCoreSpec extends AnyFunSuite with ChiselSim {
       var sawEarlyCompute = false
       var sawEarlyAddress = false
       var cycle = 0
+      val pendingAlu = scala.collection.mutable.Map.empty[(BigInt, BigInt), Int]
+      val seenWritebacks = scala.collection.mutable.Set.empty[BigInt]
       def tick(): Unit = {
+        if (dut.io.aluIssued.valid.peek().litToBoolean) {
+          val tag = dut.io.aluIssued.bits
+          pendingAlu((tag.slot.peek().litValue, tag.generation.peek().litValue)) = cycle
+        }
+        if (dut.io.writeback.valid.peek().litToBoolean) {
+          val wb = dut.io.writeback.bits
+          val seq = wb.seq.peek().litValue
+          assert(seenWritebacks.add(seq), s"duplicate writeback for sequence $seq")
+          val key = (wb.tag.slot.peek().litValue, wb.tag.generation.peek().litValue)
+          pendingAlu.remove(key).foreach { issued =>
+            assert(cycle - issued >= 2, "completion bypassed the registered writeback stage")
+          }
+        }
         val fetch = if (dut.io.fetchReq.valid.peek().litToBoolean)
           Some(dut.io.fetchReq.bits.peek().litValue.toInt) else None
         if (dut.io.retire.valid.peek().litToBoolean)
@@ -80,6 +95,8 @@ class ScalarCoreSpec extends AnyFunSuite with ChiselSim {
       dut.io.debugRegs(1).expect(41); dut.io.debugRegs(2).expect(99)
       dut.io.debugRegs(3).expect(7); dut.io.debugRegs(4).expect(100)
       dut.io.debugRegs(5).expect(42)
+      assert(pendingAlu.isEmpty, "HALT completed with undrained ALU writebacks")
+      assert(seenWritebacks.size == program.size, "lost a completion in the writeback stage")
     }
   }
 

@@ -36,11 +36,11 @@ class ScalarCore(p: XJParams) extends Module {
   val decoder = Module(new DecodeUnit(p))
   val rename = Module(new RenameStage(p))
   val rob = Module(new Rob(p))
-  val aluIssue = Module(new IssueUnit(p))
+  val aluIssue = Module(new IssueUnit(p, issueOnWakeup = false))
   val branchIssue = Module(new IssueUnit(p, headOnly = true, issueOnWakeup = false))
-  val vectorIssues = Seq.fill(5)(Module(new IssueUnit(p, vectorEnabled = true)))
-  val matrixIssue = Module(new IssueUnit(p, headOnly = true))
-  val dmaIssue = Module(new IssueUnit(p, headOnly = true))
+  val vectorIssues = Seq.fill(5)(Module(new IssueUnit(p, vectorEnabled = true, issueOnWakeup = false)))
+  val matrixIssue = Module(new IssueUnit(p, headOnly = true, issueOnWakeup = false))
+  val dmaIssue = Module(new IssueUnit(p, headOnly = true, issueOnWakeup = false))
   val dma = Module(new DmaEngine(p))
   io.external <> dma.io.axi
   dma.io.ack := io.ack
@@ -67,12 +67,17 @@ class ScalarCore(p: XJParams) extends Module {
   val matrixControlActive = RegInit(false.B)
   val matrixControlValid = RegInit(false.B)
   val matrixControlResult = Reg(new ExeResult(p))
+  // Registered arbitration output. ROB consumes one record each cycle (even a
+  // rejected stale tag), so this stage can drain and refill at II=1.
+  val writebackPending = RegInit(false.B)
+  val writebackResult = Reg(new ExeResult(p))
 
   val start = io.start && !running && !done && !fault && !dma.io.status.poisoned
   val faultDetected = running && !draining && rob.io.retire.valid && rob.io.retire.bits.exception
   val stopIssue = !running || draining || faultDetected || dma.io.status.poisoned
   val quiescent = !alu.io.busy && !branch.io.busy && !vectorBusy && !matrix.io.busy &&
-    lsu.io.quiescent && !dma.io.busy && !systemValid && !matrixControlActive && !matrixControlValid
+    lsu.io.quiescent && !dma.io.busy && !systemValid && !matrixControlActive && !matrixControlValid &&
+    !writebackPending
   val finishFault = draining && quiescent
   val flush = start || finishFault
   // Fault cleanup discards unissued reservations after completion sources drain.
@@ -231,7 +236,8 @@ class ScalarCore(p: XJParams) extends Module {
     !rob.io.head.bits.exception
   when(systemAtHead && !systemSent && !stopIssue && lsu.io.empty &&
     !alu.io.busy && !branch.io.busy && !vectorBusy && !matrix.io.busy &&
-    aluIssue.io.empty && branchIssue.io.empty && vectorEmpty && matrixIssue.io.empty && dmaIssue.io.empty && !dma.io.busy) {
+    aluIssue.io.empty && branchIssue.io.empty && vectorEmpty && matrixIssue.io.empty && dmaIssue.io.empty &&
+    !dma.io.busy && !writebackPending) {
     systemResult := 0.U.asTypeOf(new ExeResult(p))
     systemResult.tag := rob.io.head.bits.tag
     systemResult.seq := rob.io.head.bits.seq
@@ -272,10 +278,21 @@ class ScalarCore(p: XJParams) extends Module {
   val (completionValid, _, completionIndex) = oldestCompletion(
     (0 until 11).map(i => (completion(i).valid, completion(i).bits.seq, i.U(4.W))))
   for (i <- 0 until 11) {
-    completion(i).ready := completionValid && completionIndex === i.U
+    completion(i).ready := !flush && completionValid && completionIndex === i.U
   }
-  rob.io.wb.valid := completionValid
-  rob.io.wb.bits := completion(completionIndex).bits
+  // Stop completion arbitration from feeding ROB validation, wakeup selection
+  // and FU execution in the same combinational path. Do not gate draining on
+  // stopIssue: outstanding results must drain before precise-fault cleanup.
+  writebackPending := completionValid && !flush
+  when(completionValid && !flush) {
+    writebackResult := completion(completionIndex).bits
+  }
+  rob.io.wb.valid := writebackPending && !flush
+  rob.io.wb.bits := writebackResult
+  assert(PopCount(completion.map(_.fire)) <= 1.U, "only one completion may enter writeback")
+  when(flush) {
+    assert(!writebackPending, "flush must not discard an undrained writeback record")
+  }
   val broadcast = Wire(Valid(new ExeResult(p)))
   broadcast.valid := rob.io.wbAccepted
   broadcast.bits := rob.io.wb.bits

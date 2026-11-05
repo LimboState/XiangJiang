@@ -606,6 +606,35 @@ class BackendSpec extends AnyFunSuite with ChiselSim {
     }
   }
 
+  test("registered vector wakeup captures wide operands before issue and rejects exceptions") {
+    simulate(new IssueUnit(XJParams(nIssue = 3), vectorEnabled = true, issueOnWakeup = false)) { dut =>
+      initIssue(dut)
+      val producer = Tag(4, 2)
+      val entry = Allocation(Tag(1, 0), 3)
+      pokeIssue(dut.io.dispatch.bits, entry)
+      dut.io.dispatch.bits.uop.usesV1.poke(true.B)
+      pokeVectorOperand(dut.io.dispatch.bits.vsrc1, ready = false)
+      pokeTag(dut.io.dispatch.bits.vsrc1.tag, producer)
+      dut.io.dispatch.valid.poke(true.B)
+      dut.clock.step()
+      dut.io.dispatch.valid.poke(false.B)
+      dut.io.issue.ready.poke(true.B)
+      pokeResult(dut.io.wakeup.bits, Allocation(producer, 0), 42, exception = true)
+      dut.io.wakeup.valid.poke(true.B)
+      dut.clock.step()
+      dut.io.issue.valid.expect(false.B)
+      val wide = (BigInt(1) << 255) | (BigInt(123) << 128) | 456
+      pokeResult(dut.io.wakeup.bits, Allocation(producer, 0), wide)
+      dut.io.issue.valid.expect(false.B)
+      dut.clock.step()
+      dut.io.wakeup.valid.poke(false.B)
+      dut.io.issue.valid.expect(true.B)
+      dut.io.issue.bits.vsrc1.value.expect(wide.U)
+      dut.clock.step()
+      dut.io.empty.expect(true.B)
+    }
+  }
+
   test("head-only issue requires the complete ROB tag and flush frees a full single-entry station") {
     simulate(new IssueUnit(XJParams(nIssue = 1), headOnly = true)) { dut =>
       initIssue(dut)
