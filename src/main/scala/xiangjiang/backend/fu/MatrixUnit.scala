@@ -48,6 +48,11 @@ class MatrixArray(bf16: Boolean) extends Module {
   private val acc = RegInit(VecInit(Seq.fill(64)(0.U(32.W))))
   private val valid = RegInit(VecInit(Seq.fill(3)(false.B)))
   private val staging = RegInit(VecInit(Seq.fill(64)(0.U(32.W))))
+  // Store conversion is a physical writeback boundary.  Do not leave the
+  // FP32 -> BF16 rounder and the 32:1 beat mux in the MSTORE timing path.
+  // The architectural accumulator remains FP32; this register is only a
+  // cached, IEEE-RNE BF16 representation of it.
+  private val narrowAcc = RegInit(VecInit(Seq.fill(64)(0.U(16.W))))
   private val pes = Seq.tabulate(8, 8) { (_, _) =>
     Module(new SystolicPE(width, bf16))
   }
@@ -80,7 +85,7 @@ class MatrixArray(bf16: Boolean) extends Module {
 
   if (bf16) {
     io.storeData := VecInit((0 until 32).map(i =>
-      VectorFloat.narrow(acc(Cat(io.storeBeat(0), i.U(5.W)))))).asUInt
+      narrowAcc(Cat(io.storeBeat(0), i.U(5.W))))).asUInt
   } else {
     io.storeData := VecInit((0 until 16).map(i =>
       acc(Cat(io.storeBeat(1, 0), i.U(4.W))))).asUInt
@@ -254,12 +259,25 @@ class MatrixArray(bf16: Boolean) extends Module {
   }
   when(state === complete) { state := idle }
 
+  // Capture the conversion continuously.  This deliberately adds one clock
+  // between the accumulator and the store bus, while the accumulator itself
+  // remains available for a subsequent MMACC.  A completed matrix has at
+  // least the commit/dispatch gap before MSTORE can request its first beat.
+  if (bf16) {
+    for (e <- 0 until 64) {
+      narrowAcc(e) := VectorFloat.narrow(acc(e))
+    }
+  }
+
   when(io.publish.valid && !io.flush) {
     valid(io.publish.bits) := true.B
     for (e <- 0 until 64) {
       when(io.publish.bits === 0.U) { a(e) := staging(e)(width - 1, 0) }
       when(io.publish.bits === 1.U) { b(e) := staging(e)(width - 1, 0) }
-      when(io.publish.bits === 2.U) { acc(e) := staging(e) }
+      when(io.publish.bits === 2.U) {
+        acc(e) := staging(e)
+        if (bf16) { narrowAcc(e) := VectorFloat.narrow(staging(e)) }
+      }
     }
   }
   when(io.flush) { state := idle }

@@ -43,6 +43,11 @@ module matrix_array_bf16 (
     logic d_a_valid [8][8];
     logic d_b_valid [8][8];
     logic [15:0] w_narrow_result [64];
+    logic [15:0] w_publish_narrow_result [64];
+    // Registered writeback copy.  The accumulator is still the architectural
+    // FP32 state, but MSTORE must not put the FP32->BF16 rounder and the beat
+    // mux on the external SRAM timing path.
+    logic [15:0] f_narrow_result [64];
     for (genvar g_row = 0; g_row < 8; g_row++) begin : gen_row
         for (genvar g_column = 0; g_column < 8; g_column++) begin : gen_column
             systolic_pe_bf16 i_systolic_pe_bf16 (
@@ -70,10 +75,14 @@ module matrix_array_bf16 (
             .value(f_acc[g_index]),
             .result(w_narrow_result[g_index])
         );
+        bf16_narrow_fast i_bf16_publish_narrow_fast (
+            .value(f_staging[g_index]),
+            .result(w_publish_narrow_result[g_index])
+        );
     end
     for (genvar g_index = 0; g_index < 32; g_index++) begin : gen_store_word
         assign store_data[16*g_index+:16] = store_beat[0]
-            ? w_narrow_result[g_index+32] : w_narrow_result[g_index];
+            ? f_narrow_result[g_index+32] : f_narrow_result[g_index];
     end
     always_comb begin
         start_ready = f_state == ST_IDLE && !flush;
@@ -133,8 +142,20 @@ module matrix_array_bf16 (
                 f_b[v_index] <= '0;
                 f_acc[v_index] <= '0;
                 f_staging[v_index] <= '0;
+                f_narrow_result[v_index] <= '0;
             end
         end else begin
+            // Capture the old accumulator value; the final PE result is
+            // committed on this edge and becomes available for narrowing on
+            // the following edge.  MatrixUnit cannot issue MSTORE until the
+            // completed operation has passed its commit boundary.  On the
+            // publish edge use staging directly, matching the Chisel
+            // nonblocking update of acc and narrowAcc.
+            for (int v_index = 0; v_index < 64; v_index++)
+                f_narrow_result[v_index] <=
+                    (publish_valid && publish_buffer == 2'd2)
+                        ? w_publish_narrow_result[v_index]
+                        : w_narrow_result[v_index];
             if ((start_valid && start_ready) || f_state == ST_PREPARE) f_phase <= '0;
             if (f_state == ST_COMPUTE && f_phase != 7'd76) f_phase <= f_phase + 7'd1;
             if (f_state == ST_ELEMENTWISE && f_phase != 7'd6) f_phase <= f_phase + 7'd1;

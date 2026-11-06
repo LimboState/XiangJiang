@@ -101,13 +101,35 @@ class SystolicPE(elementBits: Int, bf16: Boolean) extends Module {
     pending.last
   } else io.macEnable
 
+  // IEEE-754 roundTiesToEven preserves -0 only for an exact sum of two
+  // negative zeros.  The ordinary FMA datapath already computes this sign,
+  // but keep the exceptional decision explicit and delayed with the six-stage
+  // FMA result.  This is important for FPGA implementations where the sign
+  // and zero-detect cones can otherwise arrive at the accumulator separately.
+  private val exactNegativeZero = if (bf16) {
+    // BF16 zero means exponent and fraction are both zero; the sign bit is
+    // intentionally excluded so both +0 and -0 are recognized.
+    val productIsZero = io.aIn(14, 0) === 0.U || bOperand(14, 0) === 0.U
+    val addendIsZero = addend(30, 0) === 0.U
+    val productIsNegative = io.aIn(15) ^ bOperand(15)
+    val launch = io.macEnable && productIsZero && addendIsZero &&
+      productIsNegative && addend(31)
+    val delayed = RegInit(VecInit(Seq.fill(VectorFloat.fma32PipelineStages)(false.B)))
+    delayed(0) := launch
+    for (i <- 1 until VectorFloat.fma32PipelineStages) delayed(i) := delayed(i - 1)
+    when(io.clearPipe || io.loadAccumulator) { delayed.foreach(_ := false.B) }
+    delayed.last
+  } else false.B
+  private val committedMacResult = Mux(exactNegativeZero,
+    "h80000000".U(32.W), macResult)
+
   when(io.loadAccumulator) {
     accumulator := io.accumulatorIn
   }.elsewhen(writeResult && !io.clearPipe) {
     when(io.useAccumulator) {
-      accumulator := macResult
+      accumulator := committedMacResult
     }.otherwise {
-      sum := macResult
+      sum := committedMacResult
       sumValid := true.B
       tag := io.tagIn
     }

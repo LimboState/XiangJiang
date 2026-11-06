@@ -320,10 +320,27 @@ object VectorFloat {
       Mux(x.isZero && y.isZero, zero(x.sign && y.sign, 24), Mux(less, b, a)))))
   }
 
+  /** IEEE-754 round-to-nearest, ties-to-even FP32 -> BF16 conversion.
+    *
+    * BF16 has the same exponent as FP32 and simply drops the low 16
+    * significand bits.  Consequently the complete RNE operation can be
+    * expressed directly on the FP32 encoding.  Using the common normalized
+    * rounder here is needlessly large and, more importantly, makes the
+    * matrix writeback path depend on a long combinational cone.  The direct
+    * form also makes the handling of FP32 subnormals explicit: 0x00008000
+    * is the halfway case and rounds to +0, while 0x007f8000 rounds to the
+    * minimum BF16 normal 0x0080.  The sign bit is retained for zero,
+    * including -0, as required by IEEE-754.
+    */
   def narrow(a: UInt): UInt = {
-    val x = new Parts(a, 24)
-    val finite = round(Cat(x.normalized, 0.U(3.W)), x.exponent - 26.S(12.W), x.sign, 8)
-    Mux(x.isNaN, nan(8), Mux(x.isInf, infinity(x.sign, 8), finite))
+    val isNaN = a(30, 23).andR && a(22, 0).orR
+    val increment = a(15) && (a(14, 0).orR || a(16))
+    // The extra bit catches the carry at a rounding boundary.  For finite
+    // FP32 inputs it cannot affect the BF16 sign/exponent field incorrectly;
+    // NaNs are replaced by the canonical value below.
+    val rounded = a(30, 16) +& increment
+    val finite = Cat(a(31), rounded(14, 0))
+    Mux(isNaN, nan(8), finite)
   }
 
   def fromInt(a: UInt): UInt = {
